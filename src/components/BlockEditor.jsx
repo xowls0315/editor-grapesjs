@@ -1,0 +1,1400 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import grapesjs from 'grapesjs'
+import 'grapesjs/dist/css/grapes.min.css'
+import './BlockEditor.css'
+import initialBlockHtml from '../block/salon.html?raw'
+const TOOLBAR_TEXT_TAGS = new Set([
+  'p',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'span',
+  'a',
+  'strong',
+  'em',
+  'b',
+  'i',
+  'u',
+  'li',
+  'td',
+  'th',
+])
+
+function BeToolbarSvg({ children }) {
+  return (
+    <svg className="be-toolbar-svg" width={18} height={18} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <g fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
+        {children}
+      </g>
+    </svg>
+  )
+}
+
+function getBlockRootComponent(editor) {
+  const w = editor.getWrapper()
+  return (
+    w.find('#salon-story')[0] ||
+    w.find('.salon-story')[0] ||
+    w.find('section')[0] ||
+    w.components().at(0)
+  )
+}
+
+const GJS_COMPONENT_DEFAULTS = {
+  draggable: true,
+  droppable: true,
+  copyable: true,
+  removable: true,
+  highlightable: true,
+  selectable: true,
+  hoverable: true,
+  resizable: {
+    tl: 1,
+    tc: 1,
+    tr: 1,
+    cl: 1,
+    cr: 1,
+    bl: 1,
+    bc: 1,
+    br: 1,
+    keyWidth: 'width',
+    keyHeight: 'height',
+  },
+  toolbar: [
+    {
+      id: 'el-bg',
+      label: '▣',
+      command: 'custom:component-bg',
+      attributes: { title: '요소 배경색' },
+    },
+    {
+      id: 'cpy',
+      label: '⎘',
+      command: 'core:copy',
+      attributes: { title: '복사 (Ctrl+C)' },
+    },
+    {
+      id: 'cut',
+      label: '✂',
+      command: 'custom:cut',
+      attributes: { title: '잘라내기 (Ctrl+X)' },
+    },
+    {
+      id: 'pst',
+      label: '📋',
+      command: 'core:paste',
+      attributes: { title: '붙여넣기 (Ctrl+V)' },
+    },
+    {
+      id: 'del',
+      label: '⌫',
+      command: 'core:component-delete',
+      attributes: { title: '삭제 (Delete)' },
+    },
+  ],
+}
+
+function markEditableTree(component) {
+  const tag = (component.get('tagName') || '').toLowerCase()
+  if (['img', 'br', 'hr', 'svg', 'path'].includes(tag)) {
+    if (tag === 'img') {
+      component.set({
+        editable: false,
+        draggable: true,
+        resizable: true,
+      })
+    }
+    return
+  }
+  component.components().forEach((child) => markEditableTree(child))
+  if (TOOLBAR_TEXT_TAGS.has(tag)) {
+    component.set({
+      editable: true,
+      selectable: true,
+      hoverable: true,
+      highlightable: true,
+    })
+  }
+}
+
+function configureWrapper(editor) {
+  const w = editor.getWrapper()
+  w.set({
+    selectable: false,
+    hoverable: false,
+    highlightable: false,
+    badgable: false,
+    draggable: false,
+    droppable: true,
+    removable: false,
+    copyable: false,
+  })
+}
+
+/** iframe 내부 텍스트 선택 저장 (상단 툴바 클릭 시 포커스 이탈 대비). 링크 모달 등은 caret만 있어도 저장 */
+function saveIframeSelection(editor, rangeRef, { allowCollapsed = false } = {}) {
+  try {
+    const doc = editor.Canvas.getDocument()
+    const sel = doc.getSelection()
+    if (sel && sel.rangeCount > 0 && (!sel.isCollapsed || allowCollapsed)) {
+      rangeRef.current = sel.getRangeAt(0).cloneRange()
+    }
+  } catch {
+    rangeRef.current = null
+  }
+}
+
+function restoreIframeSelection(editor, rangeRef) {
+  const r = rangeRef.current
+  if (!r) return false
+  try {
+    const doc = editor.Canvas.getDocument()
+    const sel = doc.getSelection()
+    sel.removeAllRanges()
+    sel.addRange(r)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function execOnIframeSelection(editor, rangeRef, fn) {
+  restoreIframeSelection(editor, rangeRef)
+  fn()
+}
+
+const LINK_PENDING_ATTR = 'data-be-link-pending'
+
+/**
+ * RTE 링크 모달 직전: 선택을 임시 span 으로 감쌈.
+ * 모달에서 포커스가 나가면 Grapes가 RTE 를 끄며 DOM을 동기화해 cloneRange 가 무효화되므로,
+ * 마커로 위치를 유지한 뒤 삽입 완료 시 <a> 로 치환한다.
+ */
+function wrapSelectionForPendingLink(rte) {
+  const doc = rte.doc
+  const sel = doc.getSelection()
+  if (!sel?.rangeCount) return
+  const range = sel.getRangeAt(0)
+  const span = doc.createElement('span')
+  span.setAttribute(LINK_PENDING_ATTR, '1')
+
+  if (range.collapsed) {
+    span.appendChild(doc.createTextNode('\u200b'))
+    range.insertNode(span)
+    const nr = doc.createRange()
+    nr.selectNodeContents(span)
+    nr.collapse(false)
+    sel.removeAllRanges()
+    sel.addRange(nr)
+    return
+  }
+  try {
+    range.surroundContents(span)
+  } catch {
+    const frag = range.extractContents()
+    span.appendChild(frag)
+    range.insertNode(span)
+  }
+}
+
+function unwrapPendingLinkInCanvas(editor) {
+  const doc = editor.Canvas.getDocument()
+  const el = doc.querySelector(`[${LINK_PENDING_ATTR}]`)
+  if (!el?.parentNode) return
+  const parent = el.parentNode
+  while (el.firstChild) parent.insertBefore(el.firstChild, el)
+  parent.removeChild(el)
+}
+
+function applyPendingLinkInCanvas(editor, hrefRaw) {
+  const href = hrefRaw.trim()
+  if (!href) return false
+  const doc = editor.Canvas.getDocument()
+  const pending = doc.querySelector(`[${LINK_PENDING_ATTR}]`)
+  if (!pending) return false
+  const a = doc.createElement('a')
+  a.href = href
+  a.target = '_blank'
+  a.rel = 'noopener noreferrer'
+  while (pending.firstChild) a.appendChild(pending.firstChild)
+  pending.replaceWith(a)
+  notifyGrapesInputFromDomNode(editor, a)
+  return true
+}
+
+/** 프로그램matic DOM 변경 후 Grapes 텍스트 컴포넌트에 input 과 동일하게 동기화 */
+function notifyGrapesInputFromDomNode(editor, node) {
+  try {
+    let el = node?.nodeType === 3 ? node.parentElement : node
+    while (el) {
+      if (el.__gjsv && typeof el.__gjsv.onInput === 'function') {
+        el.__gjsv.onInput()
+        return
+      }
+      el = el.parentElement
+    }
+    const cmp = editor.getSelected?.()
+    const v = cmp?.getView?.()
+    if (v?.onInput) v.onInput()
+  } catch {
+    /* ignore */
+  }
+}
+
+function rgbStringToHex(rgb) {
+  if (!rgb || rgb === 'transparent') return ''
+  const m = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i)
+  if (!m) return ''
+  const r = Number(m[1])
+  const g = Number(m[2])
+  const b = Number(m[3])
+  return `#${[r, g, b].map((x) => x.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** 네이티브 color input용 #rrggbb (없으면 기본값) */
+function hexForColorInputFromStyle(st, fallback = '#ffffff') {
+  if (!st || typeof st !== 'object') return fallback
+  const tryStr = (s) => {
+    if (!s || typeof s !== 'string') return ''
+    const t = s.trim()
+    if (/^#[0-9a-f]{6}$/i.test(t)) return t
+    if (/^#[0-9a-f]{3}$/i.test(t)) {
+      const r = t[1]
+      const g = t[2]
+      const b = t[3]
+      return `#${r}${r}${g}${g}${b}${b}`.toLowerCase()
+    }
+    return rgbStringToHex(t)
+  }
+  const fromBgc = tryStr(st['background-color'])
+  if (fromBgc) return fromBgc
+  const bg = st.background
+  if (bg && typeof bg === 'string' && !/gradient/i.test(bg)) {
+    const fromBg = tryStr(bg)
+    if (fromBg) return fromBg
+  }
+  return fallback
+}
+
+function getFontSizePxFromSelection(doc, win) {
+  const sel = doc.getSelection()
+  if (!sel?.focusNode) return 16
+  let el = sel.focusNode.nodeType === 1 ? sel.focusNode : sel.focusNode.parentElement
+  if (!el) return 16
+  const fs = parseFloat(win.getComputedStyle(el).fontSize)
+  return Number.isFinite(fs) ? Math.round(fs) : 16
+}
+
+/** 선택 영역 안의 인라인 font-size / FONT size 를 제거해 한 겹 래핑으로 통일할 때 사용 */
+function stripFontSizingFromFragment(fragment) {
+  const visit = (node) => {
+    if (node.nodeType === 1) {
+      const el = node
+      if (el.tagName === 'FONT') {
+        el.removeAttribute('size')
+      }
+      el.style?.removeProperty?.('font-size')
+      const st = el.getAttribute('style')
+      if (st !== null && (!String(st).trim())) el.removeAttribute('style')
+    }
+    const kids = node.childNodes ? [...node.childNodes] : []
+    kids.forEach(visit)
+  }
+  if (!fragment) return
+  ;[...fragment.childNodes].forEach(visit)
+}
+
+function scheduleEditorCanvasRefresh(editor) {
+  requestAnimationFrame(() => {
+    try {
+      editor?.refresh?.()
+    } catch {
+      /* ignore */
+    }
+  })
+}
+
+function getForeColorHexFromSelection(doc, win) {
+  const sel = doc.getSelection()
+  if (!sel?.focusNode) return ''
+  let el = sel.focusNode.nodeType === 1 ? sel.focusNode : sel.focusNode.parentElement
+  if (!el) return ''
+  return rgbStringToHex(win.getComputedStyle(el).color) || ''
+}
+
+function isSpanOnlyFontSize(el) {
+  if (!el || el.tagName !== 'SPAN') return false
+  const st = (el.getAttribute('style') || '').trim()
+  if (!st) return false
+  const parts = st.split(';').map((s) => s.trim()).filter(Boolean)
+  return parts.length > 0 && parts.every((p) => /^font-size\s*:/i.test(p))
+}
+
+/** 선택(또는 캐럿)에 글자 크기(px) 적용 — 중첩 span font-size 가 남아 박스가 안 줄어드는 문제 방지 */
+function applyFontSizePxToSelection(editor, doc, win, px) {
+  const n = Math.max(8, Math.min(200, Math.round(Number(px)) || 16))
+  try {
+    doc.execCommand('styleWithCSS', false, true)
+  } catch {
+    /* ignore */
+  }
+  const sel = doc.getSelection()
+  if (!sel?.rangeCount) return
+  const range = sel.getRangeAt(0)
+  let notifyEl = null
+
+  if (range.collapsed) {
+    const tn = range.startContainer
+    if (tn.nodeType === 3) {
+      const chain = []
+      let p = tn.parentElement
+      while (p && p.tagName === 'SPAN' && isSpanOnlyFontSize(p)) {
+        chain.push(p)
+        p = p.parentElement
+      }
+      if (chain.length > 0) {
+        chain.forEach((sp) => {
+          sp.style.fontSize = `${n}px`
+        })
+        notifyGrapesInputFromDomNode(editor, chain[0])
+        scheduleEditorCanvasRefresh(editor)
+        return
+      }
+    }
+    const span = doc.createElement('span')
+    span.style.fontSize = `${n}px`
+    const z = doc.createTextNode('\u200b')
+    span.appendChild(z)
+    range.insertNode(span)
+    const nr = doc.createRange()
+    nr.setStart(z, 1)
+    nr.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(nr)
+    notifyEl = span
+  } else {
+    const span = doc.createElement('span')
+    span.style.fontSize = `${n}px`
+    try {
+      const frag = range.extractContents()
+      stripFontSizingFromFragment(frag)
+      span.appendChild(frag)
+      range.insertNode(span)
+      notifyEl = span
+    } catch {
+      const t = sel.toString() || '\u200b'
+      doc.execCommand('insertHTML', false, `<span style="font-size:${n}px">${t}</span>`)
+      notifyEl = sel.anchorNode
+    }
+  }
+  if (notifyEl) notifyGrapesInputFromDomNode(editor, notifyEl)
+  scheduleEditorCanvasRefresh(editor)
+}
+
+function applyForeColorToSelection(editor, doc, color) {
+  try {
+    doc.execCommand('styleWithCSS', false, true)
+  } catch {
+    /* ignore */
+  }
+  const sel = doc.getSelection()
+  if (!sel?.rangeCount) return
+  let notifyEl = sel.anchorNode
+  if (sel.isCollapsed) {
+    const span = doc.createElement('span')
+    span.style.color = color
+    const z = doc.createTextNode('\u200b')
+    span.appendChild(z)
+    const r = sel.getRangeAt(0)
+    r.insertNode(span)
+    const nr = doc.createRange()
+    nr.setStart(z, 1)
+    nr.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(nr)
+    notifyEl = span
+  } else {
+    doc.execCommand('foreColor', false, color)
+  }
+  notifyGrapesInputFromDomNode(editor, notifyEl)
+  scheduleEditorCanvasRefresh(editor)
+}
+
+function applyHiliteColorToSelection(editor, doc, color) {
+  try {
+    doc.execCommand('styleWithCSS', false, true)
+  } catch {
+    /* ignore */
+  }
+  const sel = doc.getSelection()
+  if (!sel?.rangeCount) return
+  let notifyEl = sel.anchorNode
+  if (sel.isCollapsed) {
+    const span = doc.createElement('span')
+    span.style.backgroundColor = color
+    const z = doc.createTextNode('\u200b')
+    span.appendChild(z)
+    const r = sel.getRangeAt(0)
+    r.insertNode(span)
+    const nr = doc.createRange()
+    nr.setStart(z, 1)
+    nr.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(nr)
+    notifyEl = span
+  } else {
+    try {
+      doc.execCommand('hiliteColor', false, color)
+    } catch {
+      doc.execCommand('backColor', false, color)
+    }
+  }
+  notifyGrapesInputFromDomNode(editor, notifyEl)
+  scheduleEditorCanvasRefresh(editor)
+}
+
+function removeRteFormatExtras(toolbar) {
+  toolbar?.querySelector('.be-rte-extras')?.remove()
+}
+
+/** 주입된 RTE 보조 컨트롤(.be-rte-extras) 입력값을 캔버스 선택 기준으로 맞춤 */
+function syncRteExtrasInputsFromCanvas(editor) {
+  const toolbar = editor.RichTextEditor?.getToolbarEl?.()
+  const root = toolbar?.querySelector('.be-rte-extras')
+  if (!root) return
+  try {
+    const doc = editor.Canvas.getDocument()
+    const win = editor.Canvas.getWindow()
+    const inp = root.querySelector('[data-rte-fs-input]')
+    const fgInp = root.querySelector('[data-rte-fg-input]')
+    const fgBar = root.querySelector('[data-rte-fg-bar]')
+    if (inp) inp.value = String(getFontSizePxFromSelection(doc, win))
+    const fgHex = fgInp ? getForeColorHexFromSelection(doc, win) : ''
+    if (fgInp && fgHex) {
+      fgInp.value = fgHex
+      if (fgBar) fgBar.style.background = fgHex
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Grapes RTE 툴바에 글자 크기·색 컨트롤 주입 */
+function mountRteFormatExtras(editor, savedRangeRef) {
+  const toolbar = editor.RichTextEditor.getToolbarEl()
+  if (!toolbar) return
+  removeRteFormatExtras(toolbar)
+
+  const root = document.createElement('div')
+  root.className = 'be-rte-extras'
+  root.innerHTML = `
+    <div class="be-font-size be-font-size--rte">
+      <button type="button" class="be-btn" data-rte-act="fs-minus" title="1px 작게">−</button>
+      <input type="number" min="8" max="200" data-rte-fs-input value="16" />
+      <span class="be-font-size-suffix" aria-hidden="true">px</span>
+      <button type="button" class="be-btn" data-rte-act="fs-plus" title="1px 크게">+</button>
+    </div>
+    <label class="be-color-wrap be-color-wrap--rte" title="글자색">
+      <span class="be-color-fake" data-rte-fg-fake>A<span class="be-color-bar" data-rte-fg-bar></span></span>
+      <input type="color" data-rte-fg-input value="#f8fafc" />
+    </label>
+    <label class="be-color-wrap be-color-wrap--rte" title="텍스트 배경(형광)">
+      <span class="be-color-fake" data-rte-bg-fake>▧</span>
+      <input type="color" data-rte-bg-input value="#ffff00" />
+    </label>
+  `
+
+  const runInCanvas = (fn) => {
+    execOnIframeSelection(editor, savedRangeRef, () => {
+      const doc = editor.Canvas.getDocument()
+      const win = editor.Canvas.getWindow()
+      fn(doc, win)
+    })
+  }
+
+  root.addEventListener('mousedown', (e) => e.stopPropagation())
+
+  root.addEventListener('click', (e) => {
+    const t = e.target
+    if (t?.getAttribute?.('data-rte-act') === 'fs-minus') {
+      e.preventDefault()
+      const inp = root.querySelector('[data-rte-fs-input]')
+      const cur = Math.max(8, Math.min(200, Number(inp?.value) || 16))
+      const next = cur - 1
+      if (inp) inp.value = String(next)
+      runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
+    }
+    if (t?.getAttribute?.('data-rte-act') === 'fs-plus') {
+      e.preventDefault()
+      const inp = root.querySelector('[data-rte-fs-input]')
+      const cur = Math.max(8, Math.min(200, Number(inp?.value) || 16))
+      const next = cur + 1
+      if (inp) inp.value = String(next)
+      runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
+    }
+  })
+
+  const fsInput = root.querySelector('[data-rte-fs-input]')
+  fsInput?.addEventListener('change', () => {
+    const next = Math.max(8, Math.min(200, Number(fsInput.value) || 16))
+    fsInput.value = String(next)
+    runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
+  })
+  fsInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') fsInput.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+
+  const fgInput = root.querySelector('[data-rte-fg-input]')
+  fgInput?.addEventListener('input', () => {
+    const v = fgInput.value
+    const bar = root.querySelector('[data-rte-fg-bar]')
+    if (bar) bar.style.background = v
+    runInCanvas((doc) => applyForeColorToSelection(editor, doc, v))
+  })
+
+  const bgInput = root.querySelector('[data-rte-bg-input]')
+  bgInput?.addEventListener('input', () => {
+    const v = bgInput.value
+    runInCanvas((doc) => applyHiliteColorToSelection(editor, doc, v))
+  })
+
+  toolbar.appendChild(root)
+  requestAnimationFrame(() => syncRteExtrasInputsFromCanvas(editor))
+}
+
+function parseVideoEmbed(url) {
+  const u = url.trim()
+  if (!u) return ''
+  const yt = u.match(/(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([\w-]{11})/)
+  if (yt) {
+    return `<div class="gjs-video-wrap" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;max-width:100%;border-radius:12px;"><iframe style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" src="https://www.youtube.com/embed/${yt[1]}" allowfullscreen></iframe></div>`
+  }
+  const vm = u.match(/vimeo\.com\/(?:video\/)?(\d+)/)
+  if (vm) {
+    return `<div class="gjs-video-wrap" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;max-width:100%;border-radius:12px;"><iframe style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" src="https://player.vimeo.com/video/${vm[1]}" allowfullscreen></iframe></div>`
+  }
+  if (/^https?:\/\//i.test(u)) {
+    return `<div class="gjs-video-wrap" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;max-width:100%;border-radius:12px;"><iframe style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" src="${u.replace(/"/g, '&quot;')}" allowfullscreen></iframe></div>`
+  }
+  return ''
+}
+
+function insertHtmlIntoBlock(editor, html) {
+  const root = getBlockRootComponent(editor)
+  if (!root) {
+    editor.getWrapper().append(html)
+    return
+  }
+  const inner = root.find('.inner')[0] || root
+  inner.append(html)
+}
+
+const pendingFrameMeasureHandles = new WeakMap()
+
+function clearPendingFrameMeasures(editor) {
+  const h = pendingFrameMeasureHandles.get(editor)
+  if (h) {
+    h.timeouts.forEach(clearTimeout)
+    h.rafs.forEach(cancelAnimationFrame)
+    pendingFrameMeasureHandles.delete(editor)
+  }
+}
+
+function applyCanvasFramePx(editor, px, { skipRefresh = false } = {}) {
+  try {
+    const iframe = editor.Canvas.getFrameEl()
+    if (!iframe) return
+    const h = `${px}px`
+    iframe.style.height = h
+    iframe.style.minHeight = h
+    const wrap = iframe.closest('.gjs-frame-wrapper')
+    if (wrap) {
+      wrap.style.height = h
+      wrap.style.minHeight = h
+    }
+    if (!skipRefresh) editor.refreshCanvas?.()
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * iframe/래퍼 높이를 잠긴 픽셀(px)로 맞춤.
+ * lockRef.current 에 숫자가 있으면 편집 중에는 재측정 없이 유지하고,
+ * 코드 보기에서 소스 적용 시에만 reset 으로 다시 잠급니다.
+ */
+function syncCanvasFrameHeight(editor, lockRef, { reset = false } = {}) {
+  try {
+    const iframe = editor.Canvas.getFrameEl()
+    const doc = iframe?.contentDocument
+    const body = doc?.body
+    const rootEl = doc?.documentElement
+    if (!iframe || !body || !rootEl) return
+
+    if (!reset && lockRef.current != null) {
+      applyCanvasFramePx(editor, lockRef.current)
+      return
+    }
+
+    clearPendingFrameMeasures(editor)
+    if (reset) lockRef.current = null
+
+    let sessionMax = 320
+    const handles = { timeouts: [], rafs: [] }
+    pendingFrameMeasureHandles.set(editor, handles)
+
+    const measure = () => {
+      try {
+        if (!editor.Canvas?.getFrameEl()) return
+        const h = Math.max(
+          body.scrollHeight,
+          rootEl.scrollHeight,
+          body.offsetHeight,
+          rootEl.offsetHeight,
+          320,
+        )
+        sessionMax = Math.max(sessionMax, h)
+        lockRef.current = sessionMax
+        applyCanvasFramePx(editor, sessionMax)
+      } catch {
+        /* ignore */
+      }
+    }
+
+    measure()
+    handles.rafs.push(requestAnimationFrame(measure))
+    ;[0, 50, 150, 400, 1000].forEach((ms) => {
+      handles.timeouts.push(setTimeout(measure, ms))
+    })
+  } catch {
+    /* ignore */
+  }
+}
+
+function shouldHandleShortcut(e, modalOpen, shellEl) {
+  if (modalOpen) return false
+  const t = e.target
+  if (t.closest?.('.be-modal-overlay')) return false
+  if (!shellEl) return false
+  if (t.closest?.('.be-toolbar')) return true
+  if (t.closest?.('.gjs-editor') || t.closest?.('.gjs-cv-canvas')) return true
+  const ae = document.activeElement
+  if (ae?.tagName === 'IFRAME' && shellEl.contains(ae)) return true
+  return false
+}
+
+/** ancestor 중 contenteditable 호스트가 있으면 true (GrapesJS RTE / 브라우저 상속 반영) */
+function domNodeInsideContentEditable(node) {
+  let el = node?.nodeType === 3 ? node.parentElement : node
+  while (el && el.nodeType === 1) {
+    if (el.isContentEditable) return true
+    const attr = el.getAttribute?.('contenteditable')
+    if (attr === 'true' || attr === '') return true
+    el = el.parentElement
+  }
+  return false
+}
+
+/** keydown target이 body 등이어도, 캔버스 안에서 글자 편집 중이면 true */
+function isCanvasDomTextEditing(e, editor) {
+  const tgt = e.target
+  if (tgt?.nodeType === 3) return domNodeInsideContentEditable(tgt)
+  if (tgt?.nodeType === 1 && domNodeInsideContentEditable(tgt)) return true
+
+  try {
+    const doc = editor.Canvas.getDocument()
+    const ae = doc.activeElement
+    if (ae && ae !== doc.body && domNodeInsideContentEditable(ae)) return true
+
+    const sel = doc.getSelection()
+    if (sel?.rangeCount) return domNodeInsideContentEditable(sel.anchorNode)
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
+function domNodeInsideAnchorTag(node) {
+  if (!node) return false
+  let n = node.nodeType === 3 ? node.parentElement : node
+  while (n && n.nodeType === 1) {
+    if (n.nodeName === 'A') return true
+    n = n.parentElement
+  }
+  return false
+}
+
+/** RTE selection 이 링크 안인지 (anchor·focus 모두 확인, Grapes isValidTag 와 동일 취지) */
+function rteSelectionInsideAnchor(rte) {
+  const sel = rte?.selection?.()
+  if (!sel?.anchorNode) return false
+  if (domNodeInsideAnchorTag(sel.anchorNode)) return true
+  if (sel.focusNode && sel.focusNode !== sel.anchorNode && domNodeInsideAnchorTag(sel.focusNode)) return true
+  return false
+}
+
+/** 툴바 클릭 직전 저장된 Range 가 <a> 안을 가리키는지 (mousedown 후 selection 이 비어도 판별) */
+function savedRangeTouchesAnchor(rangeRef) {
+  const r = rangeRef.current
+  if (!r) return false
+  try {
+    if (domNodeInsideAnchorTag(r.startContainer)) return true
+    if (domNodeInsideAnchorTag(r.endContainer)) return true
+    let n = r.commonAncestorContainer
+    if (n.nodeType === 3) n = n.parentElement
+    return domNodeInsideAnchorTag(n)
+  } catch {
+    return false
+  }
+}
+
+export default function BlockEditor() {
+  const containerRef = useRef(null)
+  const shellRef = useRef(null)
+  const editorRef = useRef(null)
+  const savedRangeRef = useRef(null)
+  const iframeKeydownRef = useRef(null)
+  /** 캔버스 iframe 고정 높이(px). 코드 보기 적용 시에만 재측정 */
+  const canvasFrameLockRef = useRef(null)
+  /** RTE 링크 버튼 → 상단과 동일한 링크 모달 (selection 은 savedRangeRef 에 저장) */
+  const openRteLinkModalRef = useRef(() => {})
+
+  const [modalLink, setModalLink] = useState({ open: false, url: '' })
+  const [modalImage, setModalImage] = useState({ open: false, url: '' })
+  const [modalVideo, setModalVideo] = useState({ open: false, url: '' })
+  const [modalCode, setModalCode] = useState({ open: false, text: '' })
+
+  const anyModalOpen =
+    modalLink.open || modalImage.open || modalVideo.open || modalCode.open
+  const anyModalOpenRef = useRef(false)
+  anyModalOpenRef.current = anyModalOpen
+
+  /* 링크 모달은 RTE 툴바 mousedown 캡처에서 이미 selection 저장됨 (툴바가 iframe 밖이라 click 시점엔 선택이 사라짐) */
+  openRteLinkModalRef.current = () => {
+    setModalLink({ open: true, url: '' })
+  }
+
+  const refreshToolStyleFromSelection = useCallback(() => {
+    const editor = editorRef.current
+    if (!editor) return
+    syncRteExtrasInputsFromCanvas(editor)
+  }, [])
+
+  useEffect(() => {
+    if (!containerRef.current) return undefined
+
+    const editor = grapesjs.init({
+      container: containerRef.current,
+      height: 'auto',
+      width: '100%',
+      fromElement: false,
+      noticeOnUnload: false,
+      storageManager: false,
+      showOffsets: true,
+      showDevices: false,
+      keepUnusedStyles: true,
+      panels: { defaults: [] },
+      layerManager: { appendTo: '' },
+      styleManager: { appendTo: '' },
+      traitManager: { appendTo: '' },
+      selectorManager: { appendTo: '' },
+      blockManager: { appendTo: '' },
+      deviceManager: {
+        devices: [{ id: 'desktop', name: 'Desktop', width: '' }],
+      },
+      domComponents: {
+        defaults: GJS_COMPONENT_DEFAULTS,
+      },
+      canvas: {
+        styles: [],
+        scripts: [],
+        scrollableCanvas: true,
+      },
+      parser: {
+        optionsHtml: {
+          allowScripts: true,
+          allowUnsafeAttr: true,
+          allowUnsafeAttrValue: true,
+        },
+      },
+      richTextEditor: {
+        actions: [
+          'bold',
+          'italic',
+          'underline',
+          'strikethrough',
+          {
+            name: 'link',
+            event: 'mousedown',
+            attributes: {
+              style: 'font-size:1.4rem;padding:0 4px 2px;',
+              title: '링크',
+            },
+            result(rte) {
+              if (rteSelectionInsideAnchor(rte) || savedRangeTouchesAnchor(savedRangeRef)) {
+                rte.exec('unlink')
+                return
+              }
+              wrapSelectionForPendingLink(rte)
+              openRteLinkModalRef.current()
+            },
+          },
+        ],
+      },
+    })
+
+    editorRef.current = editor
+    editor.Keymaps.removeAll()
+
+    editor.Commands.add('custom:cut', {
+      run(ed) {
+        ed.runCommand('core:copy')
+        ed.runCommand('core:component-delete')
+      },
+    })
+
+    editor.Commands.add('custom:component-bg', {
+      run(ed) {
+        const sel = ed.getSelected()
+        if (!sel) return
+        const input = document.createElement('input')
+        input.type = 'color'
+        input.value = hexForColorInputFromStyle(sel.getStyle?.() || {})
+        input.onchange = () => {
+          sel.addStyle({ 'background-color': input.value })
+        }
+        input.click()
+      },
+    })
+
+    editor.Commands.add('custom:block-bg', {
+      run(ed) {
+        const block = getBlockRootComponent(ed)
+        if (!block) return
+        const input = document.createElement('input')
+        input.type = 'color'
+        input.value = '#0f172a'
+        input.onchange = () => {
+          block.addStyle({ background: input.value })
+        }
+        input.click()
+      },
+    })
+
+    const applyAutoFrameHeight = () => {
+      editor.Canvas.getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
+      syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: false })
+    }
+
+    let enforceLockRaf = null
+    const enforceLockedFrameSize = () => {
+      const px = canvasFrameLockRef.current
+      if (px == null) return
+      if (enforceLockRaf != null) cancelAnimationFrame(enforceLockRaf)
+      enforceLockRaf = requestAnimationFrame(() => {
+        enforceLockRaf = null
+        applyCanvasFramePx(editor, px, { skipRefresh: true })
+      })
+    }
+
+    editor.on('canvas:frame:load:body', applyAutoFrameHeight)
+    editor.on('canvas:update', enforceLockedFrameSize)
+
+    editor.setComponents(initialBlockHtml)
+
+    let removeRteToolbarCapture = null
+
+    editor.on('load', () => {
+      configureWrapper(editor)
+      markEditableTree(editor.getWrapper())
+      syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: false })
+      const frame = editor.Canvas.getFrameEl()
+      const onFrameKeydown = (e) => {
+        if (anyModalOpenRef.current) return
+        handleEditorShortcuts(e, editor, false)
+      }
+      iframeKeydownRef.current = onFrameKeydown
+      frame?.contentWindow?.addEventListener('keydown', onFrameKeydown, true)
+
+      const rteToolbar = editor.RichTextEditor.getToolbarEl()
+      const captureRteSelectionBeforeToolbarFocus = () => {
+        saveIframeSelection(editor, savedRangeRef, { allowCollapsed: true })
+      }
+      rteToolbar?.addEventListener('pointerdown', captureRteSelectionBeforeToolbarFocus, true)
+      rteToolbar?.addEventListener('mousedown', captureRteSelectionBeforeToolbarFocus, true)
+      removeRteToolbarCapture = () => {
+        rteToolbar?.removeEventListener('pointerdown', captureRteSelectionBeforeToolbarFocus, true)
+        rteToolbar?.removeEventListener('mousedown', captureRteSelectionBeforeToolbarFocus, true)
+      }
+    })
+
+    editor.on('rte:enable', () => {
+      mountRteFormatExtras(editor, savedRangeRef)
+    })
+    editor.on('rte:disable', () => {
+      removeRteFormatExtras(editor.RichTextEditor.getToolbarEl())
+    })
+
+    editor.on('component:selected', () => {
+      requestAnimationFrame(refreshToolStyleFromSelection)
+    })
+
+    function handleEditorShortcuts(e, ed, checkShell) {
+      const shell = shellRef.current
+      if (checkShell && !shouldHandleShortcut(e, anyModalOpenRef.current, shell)) return
+      if (isCanvasDomTextEditing(e, ed) && ['b', 'i', 'u', 'z', 'y', 'Z', 'c', 'x', 'v'].includes(e.key)) {
+        if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+          // 글자 편집 중 실행 취소/다시 실행은 GrapesJS 히스토리가 아니라 브라우저 contenteditable 스택
+          if (e.key === 'z' || e.key === 'y' || e.key === 'Z') {
+            return
+          }
+        }
+        return
+      }
+
+      if (e.ctrlKey || e.metaKey) {
+        const k = e.key.toLowerCase()
+        if (k === 'z' && !e.shiftKey) {
+          e.preventDefault()
+          ed.runCommand('core:undo')
+          return
+        }
+        if (k === 'z' && e.shiftKey) {
+          e.preventDefault()
+          ed.runCommand('core:redo')
+          return
+        }
+        if (k === 'y') {
+          e.preventDefault()
+          ed.runCommand('core:redo')
+          return
+        }
+        if (k === 'b' && shouldHandleShortcut(e, anyModalOpenRef.current, shell)) {
+          e.preventDefault()
+          execOnIframeSelection(ed, savedRangeRef, () => {
+            ed.Canvas.getDocument().execCommand('bold', false)
+          })
+          return
+        }
+        if (k === 'i') {
+          e.preventDefault()
+          execOnIframeSelection(ed, savedRangeRef, () => {
+            ed.Canvas.getDocument().execCommand('italic', false)
+          })
+          return
+        }
+        if (k === 'u') {
+          e.preventDefault()
+          execOnIframeSelection(ed, savedRangeRef, () => {
+            ed.Canvas.getDocument().execCommand('underline', false)
+          })
+          return
+        }
+        if (k === 'c') {
+          e.preventDefault()
+          ed.runCommand('core:copy')
+          return
+        }
+        if (k === 'x') {
+          e.preventDefault()
+          ed.runCommand('custom:cut')
+          return
+        }
+        if (k === 'v') {
+          e.preventDefault()
+          ed.runCommand('core:paste')
+          return
+        }
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !isCanvasDomTextEditing(e, ed)) {
+        e.preventDefault()
+        ed.runCommand('core:component-delete')
+      }
+    }
+
+    const onShellKeydown = (e) => {
+      if (!editorRef.current) return
+      handleEditorShortcuts(e, editorRef.current, true)
+    }
+    const shellEl = shellRef.current
+    shellEl?.addEventListener('keydown', onShellKeydown, true)
+
+    return () => {
+      removeRteToolbarCapture?.()
+      if (enforceLockRaf != null) cancelAnimationFrame(enforceLockRaf)
+      clearPendingFrameMeasures(editor)
+      shellEl?.removeEventListener('keydown', onShellKeydown, true)
+      const frame = editor.Canvas.getFrameEl()
+      if (frame?.contentWindow && iframeKeydownRef.current) {
+        frame.contentWindow.removeEventListener('keydown', iframeKeydownRef.current, true)
+      }
+      canvasFrameLockRef.current = null
+      editor.destroy()
+      editorRef.current = null
+    }
+  }, [refreshToolStyleFromSelection])
+
+  const onToolbarPointerDown = () => {
+    const ed = editorRef.current
+    if (ed) saveIframeSelection(ed, savedRangeRef, { allowCollapsed: true })
+  }
+
+  const runRte = (fn) => {
+    const ed = editorRef.current
+    if (!ed) return
+    execOnIframeSelection(ed, savedRangeRef, () => fn(ed.Canvas.getDocument()))
+  }
+
+  const clearTextAlignInDescendants = (component) => {
+    if (!component?.components) return
+    component.components().forEach((child) => {
+      const st = child.getStyle?.() || {}
+      if (Object.prototype.hasOwnProperty.call(st, 'text-align')) {
+        const { ['text-align']: _omit, ...rest } = st
+        child.setStyle?.(rest)
+      }
+      clearTextAlignInDescendants(child)
+    })
+  }
+
+  const setAlignment = (align) => {
+    const ed = editorRef.current
+    if (!ed) return
+    const map = { left: 'left', center: 'center', right: 'right', justify: 'justify' }
+    const ta = map[align] || 'left'
+    const sel = ed.getSelected()
+    if (sel) {
+      // 부모 컨테이너 정렬 시, 자식에 남아있는 text-align 인라인값이 부모 정렬을 덮지 않도록 정리
+      clearTextAlignInDescendants(sel)
+      sel.addStyle({ 'text-align': ta })
+      return
+    }
+    runRte((doc) => {
+      const cmd =
+        align === 'center'
+          ? 'justifyCenter'
+          : align === 'right'
+            ? 'justifyRight'
+            : align === 'justify'
+              ? 'justifyFull'
+              : 'justifyLeft'
+      doc.execCommand(cmd, false)
+    })
+  }
+
+  const openCodeModal = () => {
+    const ed = editorRef.current
+    if (!ed) return
+    const css = ed.getCss() || ''
+    const html = ed.getHtml() || ''
+    const text = (css.trim() ? `<style>\n${css}\n</style>\n\n` : '') + html
+    setModalCode({ open: true, text })
+  }
+
+  const formatCodeWithPrettier = async () => {
+    try {
+      const prettier = await import('prettier/standalone')
+      const htmlPlugin = await import('prettier/plugins/html')
+      const htmlPl = htmlPlugin.default ?? htmlPlugin
+      const formatted = await prettier.format(modalCode.text, {
+        parser: 'html',
+        plugins: [htmlPl],
+        printWidth: 100,
+      })
+      setModalCode((m) => ({ ...m, text: formatted }))
+    } catch (err) {
+      console.error('Prettier 실패:', err)
+    }
+  }
+
+  const applyCodeModal = () => {
+    const ed = editorRef.current
+    if (!ed) return
+    try {
+      ed.setComponents(modalCode.text)
+      configureWrapper(ed)
+      markEditableTree(ed.getWrapper())
+      ed.Canvas.getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
+      syncCanvasFrameHeight(ed, canvasFrameLockRef, { reset: true })
+      setModalCode({ open: false, text: '' })
+    } catch (err) {
+      console.error('코드 적용 실패:', err)
+      alert('HTML을 파싱할 수 없습니다. 태그를 확인해 주세요.')
+    }
+  }
+
+  const handleSave = () => {
+    if (!editorRef.current) return
+    console.log('저장이 완료되었습니다!')
+  }
+
+  return (
+    <div className="be-root" ref={shellRef}>
+      <div className="be-meta">
+        블록 1 — Salon story — 편집 영역 (보내기: <code>getExportHtml(editor)</code>). 원본:{' '}
+        <code>src/block/salon.html</code>
+      </div>
+
+      <div className="be-toolbar" onMouseDown={onToolbarPointerDown}>
+        <div className="be-toolbar-group">
+          <button type="button" className="be-btn" title="실행 취소 (Ctrl+Z)" onClick={() => editorRef.current?.runCommand('core:undo')}>
+            <BeToolbarSvg>
+              <path d="M9 14 4 9l5-5" />
+              <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11" />
+            </BeToolbarSvg>
+          </button>
+          <button type="button" className="be-btn" title="다시 실행 (Ctrl+Y)" onClick={() => editorRef.current?.runCommand('core:redo')}>
+            <BeToolbarSvg>
+              <path d="m15 14 5-5-5-5" />
+              <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5v0A5.5 5.5 0 0 0 9.5 20H13" />
+            </BeToolbarSvg>
+          </button>
+        </div>
+
+        <div className="be-toolbar-group">
+          <button type="button" className="be-btn" title="요소 배경색 (선택한 요소)" onClick={() => editorRef.current?.runCommand('custom:component-bg')}>
+            <svg className="be-toolbar-svg" width={18} height={18} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+              <rect x={4} y={4} width={16} height={16} rx={2} fill="none" stroke="currentColor" strokeWidth={1.75} />
+              <rect x={8} y={8} width={8} height={8} rx={1} fill="currentColor" fillOpacity={0.22} stroke="currentColor" strokeWidth={1.75} />
+            </svg>
+          </button>
+          <button type="button" className="be-btn" title="블록 전체 배경색" onClick={() => editorRef.current?.runCommand('custom:block-bg')}>
+            <BeToolbarSvg>
+              <rect x={3} y={3} width={18} height={18} rx={2.5} />
+              <path d="M3 15h18" />
+            </BeToolbarSvg>
+          </button>
+        </div>
+
+        <div className="be-toolbar-group">
+          <button type="button" className="be-btn" title="왼쪽 정렬" onClick={() => setAlignment('left')}>
+            <BeToolbarSvg>
+              <path d="M4 7h12M4 11h8M4 15h14" />
+            </BeToolbarSvg>
+          </button>
+          <button type="button" className="be-btn" title="가운데 정렬" onClick={() => setAlignment('center')}>
+            <BeToolbarSvg>
+              <path d="M5 7h14M7 11h10M6 15h12" />
+            </BeToolbarSvg>
+          </button>
+          <button type="button" className="be-btn" title="오른쪽 정렬" onClick={() => setAlignment('right')}>
+            <BeToolbarSvg>
+              <path d="M8 7h12M10 11h10M6 15h14" />
+            </BeToolbarSvg>
+          </button>
+          <button type="button" className="be-btn" title="양쪽 정렬" onClick={() => setAlignment('justify')}>
+            <BeToolbarSvg>
+              <path d="M4 7h16M4 11h16M4 15h16M4 19h16" />
+            </BeToolbarSvg>
+          </button>
+        </div>
+
+        <div className="be-toolbar-group">
+          <button type="button" className="be-btn" title="이미지" onClick={() => setModalImage({ open: true, url: '' })}>
+            <BeToolbarSvg>
+              <rect x={3} y={3} width={18} height={18} rx={2} />
+              <circle cx={8.5} cy={8.5} r={1.5} />
+              <path d="m21 15-4-4-6 6" />
+            </BeToolbarSvg>
+          </button>
+          <button type="button" className="be-btn" title="동영상" onClick={() => setModalVideo({ open: true, url: '' })}>
+            <svg className="be-toolbar-svg" width={18} height={18} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+              <rect x={2.5} y={5} width={13.5} height={14} rx={2} fill="none" stroke="currentColor" strokeWidth={1.75} />
+              <path d="M17 9v6l5-3-5-3z" fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+          <button type="button" className="be-btn" title="코드 보기" onClick={openCodeModal}>
+            <BeToolbarSvg>
+              <path d="m16 18 6-6-6-6" />
+              <path d="m8 6-6 6 6 6" />
+            </BeToolbarSvg>
+          </button>
+        </div>
+
+        <div className="be-spacer" />
+
+        <button type="button" className="be-save" onClick={handleSave}>
+          <svg className="be-toolbar-svg be-toolbar-svg--save" width={18} height={18} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+            <g fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+              <polyline points="17 21 17 13 7 13 7 21" />
+              <line x1={7} y1={3} x2={7} y2={8} />
+              <line x1={12} y1={3} x2={12} y2={8} />
+            </g>
+          </svg>
+          저장하기
+        </button>
+      </div>
+
+      <div className="be-canvas-wrap">
+        <div ref={containerRef} className="be-gjs-mount" />
+      </div>
+
+      {modalLink.open && (
+        <div className="be-modal-overlay" role="dialog">
+          <div className="be-modal">
+            <h3>링크 삽입</h3>
+            <div className="be-modal-body">
+              <label htmlFor="be-link-url">URL</label>
+              <input
+                id="be-link-url"
+                type="url"
+                value={modalLink.url}
+                onChange={(e) => setModalLink((m) => ({ ...m, url: e.target.value }))}
+                placeholder="https://"
+              />
+            </div>
+            <div className="be-modal-actions">
+              <button
+                type="button"
+                className="be-btn"
+                onClick={() => {
+                  const ed = editorRef.current
+                  if (ed) unwrapPendingLinkInCanvas(ed)
+                  setModalLink({ open: false, url: '' })
+                }}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className="be-btn be-btn-primary"
+                onClick={() => {
+                  const ed = editorRef.current
+                  const url = modalLink.url.trim()
+                  if (!ed || !url) return
+                  ed.Canvas.getFrameEl()?.contentWindow?.focus()
+                  if (!applyPendingLinkInCanvas(ed, url)) {
+                    restoreIframeSelection(ed, savedRangeRef)
+                    ed.Canvas.getDocument().execCommand('createLink', false, url)
+                    try {
+                      const doc = ed.Canvas.getDocument()
+                      const sel = doc.getSelection()
+                      const n = sel?.anchorNode
+                      if (n) notifyGrapesInputFromDomNode(ed, n)
+                    } catch {
+                      /* ignore */
+                    }
+                  }
+                  setModalLink({ open: false, url: '' })
+                }}
+              >
+                삽입 완료
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalImage.open && (
+        <div className="be-modal-overlay" role="dialog">
+          <div className="be-modal">
+            <h3>이미지 삽입</h3>
+            <div className="be-modal-body">
+              <label htmlFor="be-img-file">파일 선택</label>
+              <input
+                id="be-img-file"
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  const r = new FileReader()
+                  r.onload = () => setModalImage((m) => ({ ...m, url: String(r.result || '') }))
+                  r.readAsDataURL(f)
+                }}
+              />
+              <label htmlFor="be-img-url">이미지 URL</label>
+              <input
+                id="be-img-url"
+                type="url"
+                value={modalImage.url.startsWith('data:') ? '' : modalImage.url}
+                onChange={(e) => setModalImage((m) => ({ ...m, url: e.target.value }))}
+                placeholder="https://..."
+              />
+            </div>
+            <div className="be-modal-actions">
+              <button type="button" className="be-btn" onClick={() => setModalImage({ open: false, url: '' })}>
+                취소
+              </button>
+              <button
+                type="button"
+                className="be-btn be-btn-primary"
+                onClick={() => {
+                  const ed = editorRef.current
+                  const src = modalImage.url.trim()
+                  if (!ed || !src) return
+                  insertHtmlIntoBlock(ed, `<img src="${src.replace(/"/g, '&quot;')}" alt="" style="max-width:100%;height:auto;border-radius:12px;"/>`)
+                  setModalImage({ open: false, url: '' })
+                }}
+              >
+                이미지 삽입
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalVideo.open && (
+        <div className="be-modal-overlay" role="dialog">
+          <div className="be-modal">
+            <h3>동영상 삽입</h3>
+            <div className="be-modal-body">
+              <label htmlFor="be-vid-url">동영상 URL (YouTube, Vimeo 등)</label>
+              <input
+                id="be-vid-url"
+                type="url"
+                value={modalVideo.url}
+                onChange={(e) => setModalVideo((m) => ({ ...m, url: e.target.value }))}
+                placeholder="https://www.youtube.com/watch?v=..."
+              />
+            </div>
+            <div className="be-modal-actions">
+              <button type="button" className="be-btn" onClick={() => setModalVideo({ open: false, url: '' })}>
+                취소
+              </button>
+              <button
+                type="button"
+                className="be-btn be-btn-primary"
+                onClick={() => {
+                  const ed = editorRef.current
+                  const embed = parseVideoEmbed(modalVideo.url)
+                  if (!ed || !embed) return
+                  insertHtmlIntoBlock(ed, embed)
+                  setModalVideo({ open: false, url: '' })
+                }}
+              >
+                동영상 삽입
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalCode.open && (
+        <div className="be-modal-overlay" role="dialog">
+          <div className="be-modal be-modal--wide">
+            <h3>코드 보기 · 편집 (HTML)</h3>
+            <div className="be-modal-body">
+              <textarea className="be-code-area" value={modalCode.text} onChange={(e) => setModalCode((m) => ({ ...m, text: e.target.value }))} spellCheck={false} />
+            </div>
+            <div className="be-modal-actions">
+              <button type="button" className="be-btn" onClick={formatCodeWithPrettier}>
+                Prettier로 정리
+              </button>
+              <button type="button" className="be-btn" onClick={() => setModalCode({ open: false, text: '' })}>
+                취소
+              </button>
+              <button type="button" className="be-btn be-btn-primary" onClick={applyCodeModal}>
+                적용
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

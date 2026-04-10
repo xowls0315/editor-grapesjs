@@ -1,0 +1,521 @@
+.be-root {
+  --be-toolbar-h: 52px;
+  --be-meta-h: 36px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #f1f5f9;
+  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
+
+.be-meta {
+  flex-shrink: 0;
+  height: var(--be-meta-h);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-size: 12px;
+  color: #475569;
+  background: #e2e8f0;
+  border-bottom: 1px solid #cbd5e1;
+}
+
+.be-toolbar {
+  flex-shrink: 0;
+  min-height: var(--be-toolbar-h);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 8px 14px;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.be-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 10px;
+  margin-right: 4px;
+  border-right: 1px solid #e2e8f0;
+}
+
+.be-toolbar-group:last-of-type {
+  border-right: none;
+}
+
+.be-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.be-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.be-btn:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+.be-btn:active {
+  background: #f1f5f9;
+}
+
+.be-btn[data-active='true'] {
+  background: #e0f2fe;
+  border-color: #7dd3fc;
+  color: #0369a1;
+}
+
+.be-toolbar .be-toolbar-svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.be-save .be-toolbar-svg--save {
+  flex-shrink: 0;
+}
+
+.be-btn-icon {
+  font-weight: 700;
+  font-style: normal;
+}
+
+.be-font-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.be-font-size input {
+  width: 44px;
+  height: 30px;
+  border: none;
+  text-align: center;
+  font-size: 13px;
+  color: #334155;
+}
+
+.be-font-size input:focus {
+  outline: none;
+  background: #f8fafc;
+}
+
+.be-font-size-suffix {
+  padding: 0 6px 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  user-select: none;
+  align-self: center;
+}
+
+.be-font-size .be-btn {
+  min-width: 28px;
+  height: 30px;
+  border: none;
+  border-radius: 0;
+}
+
+.be-color-wrap {
+  position: relative;
+  width: 32px;
+  height: 32px;
+}
+
+.be-color-wrap input[type='color'] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+
+.be-color-fake {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.be-color-bar {
+  position: absolute;
+  bottom: 4px;
+  left: 6px;
+  right: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: #0f172a;
+  pointer-events: none;
+}
+
+.be-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #2563eb, #1d4ed8);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+}
+
+.be-save:hover {
+  filter: brightness(1.05);
+}
+
+.be-canvas-wrap {
+  flex: 1;
+  min-height: 400px;
+  position: relative;
+  padding: 12px;
+  overflow: auto;
+}
+
+/* GrapesJS: 에디터·캔버스를 콘텐츠 높이에 맞춤 (기본 overflow:hidden·고정 높이로 잘리는 문제 방지) */
+.be-gjs-mount.gjs-editor-cont {
+  height: auto !important;
+  min-height: 400px;
+}
+
+.be-canvas-wrap .gjs-editor {
+  height: auto;
+  min-height: 400px;
+}
+
+.be-canvas-wrap .gjs-cv-canvas {
+  position: relative !important;
+  top: 0 !important;
+  bottom: auto !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: auto !important;
+  min-height: 400px;
+  overflow: visible !important;
+}
+
+/* GrapesJS: 기본 패널 숨김, 캔버스만 */
+.be-canvas-wrap .gjs-one-bg {
+  background: transparent;
+}
+
+.be-canvas-wrap .gjs-cv-canvas__frames {
+  position: relative !important;
+  height: auto !important;
+  min-height: 200px;
+  overflow: visible !important;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.08);
+}
+
+/* height는 GrapesJS(ResizeObserver)가 인라인으로 설정 — !important로 덮어쓰지 않음 */
+.be-canvas-wrap .gjs-frame-wrapper {
+  position: relative !important;
+  left: auto !important;
+  right: auto !important;
+  width: 100% !important;
+  min-height: 200px;
+  margin: 0 !important;
+}
+
+/* 기본 absolute+height:100%는 래퍼가 짧을 때 본문을 세로로 잘름 — 높이는 JS(syncCanvasFrameHeight)가 픽셀로 맞춤 */
+.be-canvas-wrap .gjs-frame {
+  position: relative !important;
+  top: auto !important;
+  bottom: auto !important;
+  left: auto !important;
+  right: auto !important;
+  border: none;
+  border-radius: 12px;
+  display: block;
+  width: 100% !important;
+}
+
+/* 컴포넌트 툴바 스타일 (선택 시 플로팅)
+   Grapes 기본은 파란 배경 + color:#fff — 배경만 흰색으로 바꾸면 글자도 흰색이라 라벨/아이콘이 안 보임 */
+.be-canvas-wrap .gjs-toolbar {
+  background: #fff !important;
+  color: #1e293b !important;
+  border-radius: 10px !important;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.15) !important;
+  padding: 4px 6px !important;
+  gap: 2px !important;
+}
+
+.be-canvas-wrap .gjs-toolbar-item {
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 8px !important;
+  color: #1e293b !important;
+}
+
+.be-canvas-wrap .gjs-toolbar-item svg {
+  fill: currentColor !important;
+}
+
+/* RTE(텍스트 편집) 플로팅 툴바 — 기본 테마 변수가 어두운 캔버스와 겹치면 대비가 안 나옴 */
+.be-canvas-wrap .gjs-rte-toolbar-ui {
+  background: #fff !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 10px !important;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.15) !important;
+  overflow: visible;
+  max-width: min(100%, 720px);
+}
+
+.be-canvas-wrap .gjs-rte-toolbar {
+  display: flex !important;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px !important;
+}
+
+.be-canvas-wrap .gjs-rte-actionbar {
+  background: #fff !important;
+  display: inline-flex !important;
+  flex: 0 0 auto;
+}
+
+.be-rte-extras {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.be-font-size--rte {
+  min-height: 0;
+  border-right: 1px solid #e2e8f0;
+  padding-right: 6px;
+  margin-right: 2px;
+}
+
+.be-font-size--rte input[data-rte-fs-input] {
+  width: 40px;
+  height: 26px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  text-align: center;
+  font-size: 12px;
+  color: #1e293b;
+}
+
+.be-font-size--rte .be-font-size-suffix {
+  padding: 0 2px 0 0;
+  font-size: 11px;
+}
+
+.be-font-size--rte .be-btn {
+  min-width: 26px;
+  height: 26px;
+  font-size: 14px;
+}
+
+/* RTE 플로팅 툴바: Grapes 기본 액션(.gjs-rte-action)과 동일한 대비·구분선 */
+.be-canvas-wrap .be-color-wrap--rte {
+  position: relative;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  width: 25px !important;
+  height: 25px !important;
+  min-width: 25px;
+  min-height: 25px;
+  margin: 0;
+  padding: 5px;
+  box-sizing: content-box;
+  border-right: 1px solid #e2e8f0 !important;
+  border-radius: 0 !important;
+  cursor: pointer;
+}
+
+.be-canvas-wrap .be-color-wrap--rte:last-of-type {
+  border-right: none !important;
+}
+
+.be-canvas-wrap .be-color-wrap--rte .be-color-fake {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: #1e293b !important;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.be-canvas-wrap .be-color-wrap--rte:hover .be-color-fake {
+  background: #f1f5f9 !important;
+  border-radius: 4px !important;
+}
+
+.be-canvas-wrap .be-color-wrap--rte .be-color-bar {
+  bottom: 2px;
+  left: 4px;
+  right: 4px;
+}
+
+.be-canvas-wrap .gjs-rte-action {
+  color: #1e293b !important;
+  border-right-color: #e2e8f0 !important;
+}
+
+.be-canvas-wrap .gjs-rte-action:hover {
+  background: #f1f5f9 !important;
+}
+
+.be-canvas-wrap .gjs-rte-active {
+  background: #e0f2fe !important;
+  color: #0369a1 !important;
+}
+
+.be-canvas-wrap .gjs-rte-disabled {
+  color: #94a3b8 !important;
+}
+
+.be-canvas-wrap .gjs-rte-disabled:hover {
+  background: transparent !important;
+}
+
+.be-canvas-wrap .gjs-rte-action svg {
+  fill: currentColor !important;
+}
+
+/* 모달 */
+.be-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 24px;
+}
+
+.be-modal {
+  width: min(640px, 100%);
+  max-height: min(90vh, 900px);
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.2);
+  overflow: hidden;
+}
+
+.be-modal.be-modal--wide {
+  width: min(960px, 100%);
+}
+
+.be-modal h3 {
+  margin: 0;
+  padding: 18px 20px;
+  font-size: 17px;
+  font-weight: 600;
+  color: #0f172a;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.be-modal-body {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+}
+
+.be-modal-body label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.be-modal-body input[type='text'],
+.be-modal-body input[type='url'] {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.be-modal-body textarea.be-code-area {
+  width: 100%;
+  min-height: 360px;
+  padding: 14px;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  background: #0f172a;
+  color: #e2e8f0;
+  resize: vertical;
+  tab-size: 2;
+}
+
+.be-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.be-modal-actions .be-btn {
+  min-width: 100px;
+  height: 38px;
+}
+
+.be-modal-actions .be-btn-primary {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+
+.be-modal-actions .be-btn-primary:hover {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}

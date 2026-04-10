@@ -1,0 +1,256 @@
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+<style>
+  *{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+  }
+
+  body{
+    font-family:"Pretendard",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    background:#0f172a;
+    color:#f8fafc;
+    line-height:1.6;
+    word-break:keep-all;
+  }
+
+  a{
+    color:inherit;
+    text-decoration:none;
+  }
+
+  ul{
+    list-style:none;
+  }
+
+  .inner{
+    width:min(100%, 1320px);
+    margin:0 auto;
+    padding:0 max(20px, env(safe-area-inset-left)) 0 max(20px, env(safe-area-inset-right));
+  }
+
+  .salon-story{
+    position:relative;
+    padding:96px 0 104px;
+    background:
+      radial-gradient(circle at 18% 28%, rgba(200,171,132,.14), transparent 34%),
+      radial-gradient(circle at 82% 72%, rgba(229,215,196,.1), transparent 30%),
+      linear-gradient(180deg, #0c1322 0%, #0f172a 48%, #111f33 100%);
+    overflow:hidden;
+  }
+
+  .salon-story::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    background:
+      linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+    background-size:56px 56px;
+    mask-image:linear-gradient(180deg, rgba(0,0,0,.5), transparent 90%);
+    pointer-events:none;
+  }
+
+  .story-grid{
+    position:relative;
+    z-index:1;
+    display:grid;
+    grid-template-columns:minmax(0, 1fr) minmax(0, 1.05fr);
+    gap:clamp(32px, 5vw, 56px);
+    align-items:center;
+  }
+
+  .story-copy .mini{
+    display:inline-flex;
+    align-items:center;
+    gap:10px;
+    height:38px;
+    padding:0 16px;
+    border-radius:999px;
+    border:1px solid rgba(255,255,255,.14);
+    background:rgba(255,255,255,.06);
+    font-size:13px;
+    color:#f2e8dc;
+    margin-bottom:20px;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+  }
+
+  .story-copy h2{
+    font-size:clamp(28px, 3.6vw, 44px);
+    line-height:1.2;
+    font-weight:600;
+    letter-spacing:-0.03em;
+    color:#fff;
+  }
+
+  .story-copy > p{
+    margin-top:18px;
+    font-size:17px;
+    color:rgba(255,255,255,.72);
+    max-width:520px;
+  }
+
+  .story-points{
+    margin-top:28px;
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+  }
+
+  .story-points li{
+    display:flex;
+    gap:14px;
+    align-items:flex-start;
+    padding:16px 18px;
+    border-radius:18px;
+    border:1px solid rgba(255,255,255,.1);
+    background:rgba(255,255,255,.04);
+  }
+
+  /* li 직계 <i>만 아이콘 박스 — 하위 본문에 execCommand(italic)로 생기는 <i>는 제외 */
+  .story-points li > i{
+    width:40px;
+    height:40px;
+    border-radius:12px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    flex-shrink:0;
+    font-size:16px;
+    color:#042f2e;
+    background:linear-gradient(135deg,#e8d8c3,#c8ab84);
+  }
+
+  .story-points li strong{
+    display:block;
+    font-size:16px;
+    font-weight:600;
+    color:#fff;
+    margin-bottom:4px;
+  }
+
+  .story-points li span{
+    font-size:14px;
+    color:rgba(255,255,255,.62);
+    line-height:1.55;
+  }
+
+  .story-visual{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0,1fr));
+    gap:16px;
+  }
+
+  .story-visual .tile{
+    position:relative;
+    border-radius:22px;
+    overflow:hidden;
+    border:1px solid rgba(255,255,255,.1);
+    aspect-ratio:4/3;
+    background:#1e293b;
+  }
+
+  .story-visual .tile img{
+    width:100%;
+    height:100%;
+    object-fit:cover;
+    display:block;
+    transition:transform .6s ease;
+  }
+
+  .story-visual .tile:hover img{
+    transform:scale(1.04);
+  }
+
+  .story-visual .tile:first-child{
+    grid-column:1 / -1;
+    aspect-ratio:16/9;
+  }
+
+  .story-visual .tile .cap{
+    position:absolute;
+    left:0;
+    right:0;
+    bottom:0;
+    padding:16px 18px;
+    background:linear-gradient(180deg, transparent, rgba(15,23,42,.88));
+    font-size:14px;
+    font-weight:600;
+    color:#fff;
+  }
+
+  @media (max-width: 992px){
+    .story-grid{
+      grid-template-columns:1fr;
+    }
+
+    .story-visual{
+      order:-1;
+    }
+  }
+
+  @media (max-width: 480px){
+    .salon-story{
+      padding:72px 0 84px;
+    }
+
+    .story-copy > p{
+      font-size:15px;
+    }
+
+    .story-visual{
+      gap:12px;
+    }
+
+    .story-visual .tile{
+      border-radius:18px;
+    }
+
+  }
+</style>
+<section class="salon-story" id="salon-story">
+  <div class="inner">
+    <div class="story-grid">
+      <div class="story-copy">
+        <span class="mini"><i class="fa-solid fa-heart"></i> Our Salon</span>
+        <h2>일상의 컬러를 바꾸는<br>작은 럭셔리, OOO 헤어</h2>
+        <p> 트렌드를 무리하게 따라가기보다 고객의 얼굴형·라이프스타일에 맞는 밸런스를 우선합니다. 정제된 공간과 세심한 케어로 머리 끝까지 편안함을 지향합니다. </p>
+        <ul class="story-points">
+          <li>
+            <i class="fa-solid fa-leaf"></i>
+            <div>
+              <strong>모발·두피 우선 케어</strong>
+              <span>시술 전 컨디션 체크와 맞춤 제품으로 자극을 줄이고 광택과 탄력을 살립니다.</span>
+            </div>
+          </li>
+          <li>
+            <i class="fa-solid fa-clock"></i>
+            <div>
+              <strong>예약제 · 여유로운 동선</strong>
+              <span>동시 대량 접객보다 집중 상담과 시술 시간을 확보해 퀄리티를 지킵니다.</span>
+            </div>
+          </li>
+        </ul>
+      </div>
+      <div class="story-visual">
+        <div class="tile">
+          <img src="https://i-web.kr/iweb-TJc004/images/story.png" alt="살롱 시술 공간" width="800" height="450"
+            loading="lazy">
+          <span class="cap">Private styling seats</span>
+        </div>
+        <div class="tile">
+          <img src="https://i-web.kr/iweb-TJc004/images/main3-2.png" alt="헤어 디테일" width="600" height="450"
+            loading="lazy">
+          <span class="cap">Detail finish</span>
+        </div>
+        <div class="tile">
+          <img src="https://i-web.kr/iweb-TJc004/images/main3-3.png" alt="살롱 인테리어" width="600" height="450"
+            loading="lazy">
+          <span class="cap">Lounge mood</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
