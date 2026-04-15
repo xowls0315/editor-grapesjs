@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import Editor from '@monaco-editor/react'
 import grapesjs from 'grapesjs'
 import 'grapesjs/dist/css/grapes.min.css'
 import './BlockEditor.css'
@@ -592,6 +593,18 @@ function insertHtmlIntoBlock(editor, html) {
   inner.append(html)
 }
 
+function splitStyleAndHtml(codeText) {
+  const src = String(codeText || '')
+  const styleRegex = /<style\b[^>]*>([\s\S]*?)<\/style>/gi
+  const styles = []
+  let html = src
+  html = html.replace(styleRegex, (_, css) => {
+    styles.push(String(css || '').trim())
+    return ''
+  })
+  return { css: styles.filter(Boolean).join('\n\n'), html: html.trim() }
+}
+
 const pendingFrameMeasureHandles = new WeakMap()
 
 function clearPendingFrameMeasures(editor) {
@@ -759,6 +772,7 @@ export default function BlockEditor() {
   const iframeKeydownRef = useRef(null)
   /** 캔버스 iframe 고정 높이(px). 코드 보기 적용 시에만 재측정 */
   const canvasFrameLockRef = useRef(null)
+  const codeOpenTextRef = useRef('')
   /** RTE 링크 버튼 → 상단과 동일한 링크 모달 (selection 은 savedRangeRef 에 저장) */
   const openRteLinkModalRef = useRef(() => {})
 
@@ -766,6 +780,11 @@ export default function BlockEditor() {
   const [modalImage, setModalImage] = useState({ open: false, url: '' })
   const [modalVideo, setModalVideo] = useState({ open: false, url: '' })
   const [modalCode, setModalCode] = useState({ open: false, text: '' })
+  const [codeApplyState, setCodeApplyState] = useState({
+    status: 'idle', // idle | applying | failure
+    message: '',
+    details: '',
+  })
 
   const anyModalOpen =
     modalLink.open || modalImage.open || modalVideo.open || modalCode.open
@@ -1091,17 +1110,27 @@ export default function BlockEditor() {
     const css = ed.getCss() || ''
     const html = ed.getHtml() || ''
     const text = (css.trim() ? `<style>\n${css}\n</style>\n\n` : '') + html
+    setCodeApplyState({ status: 'idle', message: '', details: '' })
+    codeOpenTextRef.current = text
     setModalCode({ open: true, text })
+  }
+
+  const closeCodeModal = () => {
+    codeOpenTextRef.current = ''
+    setCodeApplyState({ status: 'idle', message: '', details: '' })
+    setModalCode({ open: false, text: '' })
   }
 
   const formatCodeWithPrettier = async () => {
     try {
       const prettier = await import('prettier/standalone')
       const htmlPlugin = await import('prettier/plugins/html')
+      const postcssPlugin = await import('prettier/plugins/postcss')
       const htmlPl = htmlPlugin.default ?? htmlPlugin
+      const postcssPl = postcssPlugin.default ?? postcssPlugin
       const formatted = await prettier.format(modalCode.text, {
         parser: 'html',
-        plugins: [htmlPl],
+        plugins: [htmlPl, postcssPl],
         printWidth: 100,
       })
       setModalCode((m) => ({ ...m, text: formatted }))
@@ -1113,17 +1142,65 @@ export default function BlockEditor() {
   const applyCodeModal = () => {
     const ed = editorRef.current
     if (!ed) return
+    setCodeApplyState({ status: 'applying', message: '코드를 적용하는 중입니다...', details: '' })
+    if (modalCode.text.trim() === codeOpenTextRef.current.trim()) {
+      closeCodeModal()
+      return
+    }
+    const { css, html } = splitStyleAndHtml(modalCode.text)
+    const nextHtml = html.trim()
+    if (!nextHtml) {
+      setCodeApplyState({
+        status: 'failure',
+        message: '적용할 HTML이 비어 있습니다. 태그를 확인해 주세요.',
+        details: '',
+      })
+      return
+    }
+
     try {
-      ed.setComponents(modalCode.text)
+      ed.setComponents(nextHtml)
+    } catch (err) {
+      console.error('코드 적용 실패(setComponents):', err)
+      setCodeApplyState({
+        status: 'failure',
+        message: 'HTML 적용에 실패했습니다. 태그 구조를 확인해 주세요.',
+        details: String(err?.message || err || ''),
+      })
+      return
+    }
+
+    try {
+      ed.CssComposer?.clear?.()
+      ed.setStyle(css)
+    } catch (err) {
+      setCodeApplyState({
+        status: 'failure',
+        message: 'CSS 적용에 실패했습니다. 문법을 확인해 주세요.',
+        details: String(err?.message || err || ''),
+      })
+      return
+    }
+
+    try {
       configureWrapper(ed)
       markEditableTree(ed.getWrapper())
-      ed.Canvas.getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
+      if (typeof ed.Canvas?.getCurrentFrameModel === 'function') {
+        ed.Canvas.getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
+      }
       syncCanvasFrameHeight(ed, canvasFrameLockRef, { reset: true })
-      setModalCode({ open: false, text: '' })
+      ed.refresh?.()
     } catch (err) {
-      console.error('코드 적용 실패:', err)
-      alert('HTML을 파싱할 수 없습니다. 태그를 확인해 주세요.')
+      console.error('코드 적용 후처리 실패:', err)
+      setCodeApplyState({
+        status: 'failure',
+        message: '코드 적용 후처리 중 실패했습니다.',
+        details: String(err?.message || err || ''),
+      })
+      return
     }
+
+    closeCodeModal()
   }
 
   const handleSave = () => {
@@ -1375,20 +1452,47 @@ export default function BlockEditor() {
       )}
 
       {modalCode.open && (
-        <div className="be-modal-overlay" role="dialog">
-          <div className="be-modal be-modal--wide">
-            <h3>코드 보기 · 편집 (HTML)</h3>
-            <div className="be-modal-body">
-              <textarea className="be-code-area" value={modalCode.text} onChange={(e) => setModalCode((m) => ({ ...m, text: e.target.value }))} spellCheck={false} />
+        <div className="be-modal-overlay be-code-modal-backdrop" role="presentation" onMouseDown={closeCodeModal}>
+          <div className="be-modal be-modal--wide be-code-modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
+            <header className="be-code-modal__head">
+              <h3>HTML / 코드편집</h3>
+              <button type="button" className="be-code-modal__close" onClick={closeCodeModal}>
+                닫기
+              </button>
+            </header>
+            <p className="be-code-modal__desc">블록 내보내기 HTML을 편집합니다. 적용하면 편집 상태가 복원됩니다.</p>
+            <div className="be-modal-body be-code-modal__editor">
+              <Editor
+                height="480px"
+                defaultLanguage="html"
+                theme="vs-dark"
+                value={modalCode.text}
+                onChange={(v) => setModalCode((m) => ({ ...m, text: v || '' }))}
+                options={{
+                  fontSize: 13,
+                  lineHeight: 22,
+                  minimap: { enabled: true },
+                  wordWrap: 'on',
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  tabSize: 2,
+                }}
+              />
             </div>
-            <div className="be-modal-actions">
+            {codeApplyState.status !== 'idle' && (
+              <div className={`be-code-modal__notice be-code-modal__notice--${codeApplyState.status === 'applying' ? 'info' : 'error'}`}>
+                <p>{codeApplyState.message}</p>
+                {codeApplyState.details ? <pre>{codeApplyState.details}</pre> : null}
+              </div>
+            )}
+            <div className="be-modal-actions be-code-modal__foot">
               <button type="button" className="be-btn" onClick={formatCodeWithPrettier}>
                 Prettier로 정리
               </button>
-              <button type="button" className="be-btn" onClick={() => setModalCode({ open: false, text: '' })}>
+              <button type="button" className="be-btn" onClick={closeCodeModal}>
                 취소
               </button>
-              <button type="button" className="be-btn be-btn-primary" onClick={applyCodeModal}>
+              <button type="button" className="be-btn be-btn-primary" onClick={applyCodeModal} disabled={codeApplyState.status === 'applying'}>
                 적용
               </button>
             </div>

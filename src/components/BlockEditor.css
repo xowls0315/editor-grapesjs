@@ -482,15 +482,15 @@
 
 .be-modal-body textarea.be-code-area {
   width: 100%;
-  min-height: 360px;
-  padding: 14px;
-  border: 1px solid #1e293b;
-  border-radius: 10px;
+  min-height: 480px;
+  padding: 14px 16px;
+  border: 1px solid #2f3340;
+  border-radius: 8px;
   font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
   font-size: 13px;
-  line-height: 1.55;
-  background: #0f172a;
-  color: #e2e8f0;
+  line-height: 1.7;
+  background: #1e1e1e;
+  color: #e5e7eb;
   resize: vertical;
   tab-size: 2;
 }
@@ -518,4 +518,141 @@
 .be-modal-actions .be-btn-primary:hover {
   background: #1d4ed8;
   border-color: #1d4ed8;
+}
+
+/* 코드 편집 모달: editor-sample의 html-code-modal 톤 */
+.be-code-modal-backdrop {
+  background: rgba(15, 23, 42, 0.55);
+  z-index: 100;
+}
+
+.be-code-modal {
+  background: #1e1e1e;
+  border-radius: 10px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+}
+
+.be-code-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: #252526;
+  border-bottom: 1px solid #333;
+}
+
+.be-code-modal__head h3 {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: #e2e8f0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.be-code-modal__close {
+  padding: 6px 12px;
+  font-size: 12px;
+  border: 1px solid #52525b;
+  border-radius: 6px;
+  background: #3f3f46;
+  color: #fff;
+  cursor: pointer;
+}
+
+.be-code-modal__desc {
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 12px;
+  color: #94a3b8;
+  border-bottom: 1px solid #333;
+  background: #252526;
+}
+
+.be-code-modal__editor {
+  padding: 12px 16px;
+  background: #1e1e1e;
+  min-height: 0;
+}
+
+.be-code-modal__editor .be-code-area {
+  min-height: 480px;
+  border-color: #2f3340;
+}
+
+.be-code-modal__editor .monaco-editor,
+.be-code-modal__editor .monaco-editor .overflow-guard {
+  border-radius: 8px;
+}
+
+.be-code-modal__notice {
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.be-code-modal__notice p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.be-code-modal__notice pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 11px;
+  opacity: 0.92;
+}
+
+.be-code-modal__notice--info {
+  color: #bfdbfe;
+  background: rgba(37, 99, 235, 0.18);
+  border-color: rgba(147, 197, 253, 0.4);
+}
+
+.be-code-modal__notice--warning {
+  color: #fde68a;
+  background: rgba(217, 119, 6, 0.18);
+  border-color: rgba(251, 191, 36, 0.38);
+}
+
+.be-code-modal__notice--error {
+  color: #fecaca;
+  background: rgba(220, 38, 38, 0.16);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.be-code-modal__foot {
+  background: #252526;
+  border-top: 1px solid #333;
+}
+
+.be-code-modal__foot .be-btn {
+  border-color: #52525b;
+  background: #3f3f46;
+  color: #e2e8f0;
+}
+
+.be-code-modal__foot .be-btn:hover {
+  background: #4b4b53;
+  border-color: #63636b;
+}
+
+.be-code-modal__foot .be-btn-primary {
+  border: none;
+  background: #2563eb;
+  color: #fff;
+}
+
+.be-code-modal__foot .be-btn-primary:hover {
+  background: #1d4ed8;
+}
+
+.be-code-modal__foot .be-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
