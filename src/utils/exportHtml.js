@@ -4,7 +4,7 @@
  */
 export function getExportHtml(editor) {
   if (!editor) return ''
-  const css = editor.getCss()
+  const css = editor.getCss({ avoidProtected: true })
   const html = editor.getHtml()
   const styleBlock = css?.trim() ? `<style>\n${css}\n</style>\n` : ''
   return `${styleBlock}${html}`

@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import grapesjs from 'grapesjs'
 import 'grapesjs/dist/css/grapes.min.css'
 import './BlockEditor.css'
-import initialBlockHtml from '../block/salon.html?raw'
 const TOOLBAR_TEXT_TAGS = new Set([
   'p',
   'h1',
@@ -39,6 +38,7 @@ function getBlockRootComponent(editor) {
   return (
     w.find('#salon-story')[0] ||
     w.find('.salon-story')[0] ||
+    w.find('.studio-root')[0] ||
     w.find('section')[0] ||
     w.components().at(0)
   )
@@ -593,16 +593,106 @@ function insertHtmlIntoBlock(editor, html) {
   inner.append(html)
 }
 
-function splitStyleAndHtml(codeText) {
+function isStylesheetLinkTag(tag) {
+  return /\brel\s*=\s*(['"]?)stylesheet\1/i.test(String(tag || ''))
+}
+
+function splitHeadAssetsAndHtml(codeText) {
   const src = String(codeText || '')
-  const styleRegex = /<style\b[^>]*>([\s\S]*?)<\/style>/gi
-  const styles = []
+  const linkTags = []
   let html = src
+  html = html.replace(/<link\b[^>]*>/gi, (full) => {
+    if (isStylesheetLinkTag(full)) {
+      linkTags.push(full.trim())
+      return ''
+    }
+    return full
+  })
+
+  const styles = []
+  const styleRegex = /<style\b[^>]*>([\s\S]*?)<\/style>/gi
   html = html.replace(styleRegex, (_, css) => {
     styles.push(String(css || '').trim())
     return ''
   })
-  return { css: styles.filter(Boolean).join('\n\n'), html: html.trim() }
+
+  return {
+    links: linkTags,
+    css: styles.filter(Boolean).join('\n\n'),
+    html: html.trim(),
+  }
+}
+
+function composeHeadAssetsMarkup({ links = [], css = '' }) {
+  const linkPart = links.filter(Boolean).join('\n')
+  const stylePart = css.trim() ? `<style>\n${css.trim()}\n</style>` : ''
+  return [linkPart, stylePart].filter(Boolean).join('\n\n').trim()
+}
+
+function injectCanvasHeadAssets(editor, { links = [], css = '' }) {
+  const doc = editor.Canvas.getDocument()
+  const head = doc?.head
+  if (!head) return
+
+  head.querySelectorAll('[data-be-head-asset="1"]').forEach((el) => el.remove())
+
+  links.forEach((tag) => {
+    const tpl = doc.createElement('template')
+    tpl.innerHTML = String(tag || '').trim()
+    const el = tpl.content.firstElementChild
+    if (el?.tagName === 'LINK') {
+      el.setAttribute('data-be-head-asset', '1')
+      head.appendChild(el)
+    }
+  })
+
+  if (css.trim()) {
+    const styleEl = doc.createElement('style')
+    styleEl.setAttribute('data-be-head-asset', '1')
+    styleEl.textContent = css
+    head.appendChild(styleEl)
+  }
+}
+
+/** <style> 제거 뒤 HTML 조각에서 <script> 태그만 분리 (재조합 시 HTML 끝에 이어 붙임) */
+function splitHtmlAndScripts(htmlChunk) {
+  const scripts = []
+  const htmlOnly = String(htmlChunk || '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, (full) => {
+    scripts.push(full)
+    return ''
+  })
+  return {
+    htmlOnly: htmlOnly.replace(/\n{3,}/g, '\n\n').trim(),
+    scriptsJoined: scripts.join('\n\n').trim(),
+  }
+}
+
+function parseCodeModalSections(fullText) {
+  const { css, links, html } = splitHeadAssetsAndHtml(fullText)
+  const { htmlOnly, scriptsJoined } = splitHtmlAndScripts(html)
+  return { css: css.trim(), links, htmlOnly, scriptsJoined }
+}
+
+function composeCodeModalSections({ links = [], css, htmlOnly, scriptsJoined }) {
+  const linkPart = links.filter(Boolean).join('\n')
+  const stylePart = css.trim() ? `<style>\n${css.trim()}\n</style>` : ''
+  const headPart = [linkPart, stylePart].filter(Boolean).join('\n\n')
+  const h = String(htmlOnly || '').trim()
+  const s = String(scriptsJoined || '').trim()
+  return `${headPart ? `${headPart}\n\n` : ''}${h}${s ? `\n${s}` : ''}`
+}
+
+async function formatDocumentWithPrettier(text) {
+  const prettier = await import('prettier/standalone')
+  const htmlPlugin = await import('prettier/plugins/html')
+  const postcssPlugin = await import('prettier/plugins/postcss')
+  const htmlPl = htmlPlugin.default ?? htmlPlugin
+  const postcssPl = postcssPlugin.default ?? postcssPlugin
+  return prettier.format(String(text || ''), {
+    parser: 'html',
+    plugins: [htmlPl, postcssPl],
+    printWidth: 100,
+  })
 }
 
 const pendingFrameMeasureHandles = new WeakMap()
@@ -693,6 +783,7 @@ function shouldHandleShortcut(e, modalOpen, shellEl) {
   if (t.closest?.('.be-modal-overlay')) return false
   if (!shellEl) return false
   if (t.closest?.('.be-toolbar')) return true
+  if (t.closest?.('.be-img-toolbar')) return true
   if (t.closest?.('.gjs-editor') || t.closest?.('.gjs-cv-canvas')) return true
   const ae = document.activeElement
   if (ae?.tagName === 'IFRAME' && shellEl.contains(ae)) return true
@@ -764,22 +855,80 @@ function savedRangeTouchesAnchor(rangeRef) {
   }
 }
 
-export default function BlockEditor() {
+const initialImgToolbarState = { visible: false, top: 0, left: 0 }
+
+function isImgComponent(cmp) {
+  if (!cmp) return false
+  const tag = (cmp.get('tagName') || '').toLowerCase()
+  if (tag === 'img') return true
+  const type = String(cmp.get('type') || '').toLowerCase()
+  return type === 'image'
+}
+
+function syncImageToolbarPosition(editor, cmp, shellEl, setImgToolbar) {
+  if (!isImgComponent(cmp)) {
+    setImgToolbar(initialImgToolbarState)
+    return
+  }
+  try {
+    const el = cmp.getEl?.()
+    const iframe = editor.Canvas.getFrameEl()
+    if (!el?.getBoundingClientRect || !iframe || !shellEl?.getBoundingClientRect) {
+      setImgToolbar(initialImgToolbarState)
+      return
+    }
+    const inner = el.getBoundingClientRect()
+    const ir = iframe.getBoundingClientRect()
+    const shellRect = shellEl.getBoundingClientRect()
+    const top = ir.top + inner.bottom - shellRect.top + shellEl.scrollTop + 8
+    const left = ir.left + inner.left + inner.width / 2 - shellRect.left + shellEl.scrollLeft
+    setImgToolbar({ visible: true, top, left })
+  } catch {
+    setImgToolbar(initialImgToolbarState)
+  }
+}
+
+function applyImageSrcToComponent(editor, component, srcRaw) {
+  const src = String(srcRaw || '').trim()
+  if (!editor || !component || !src) return
+  try {
+    component.addAttributes({ src })
+    const el = component.getEl?.()
+    if (el) {
+      el.setAttribute('src', src)
+      notifyGrapesInputFromDomNode(editor, el)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * @param {{ initialHtml: string; blockLabel: string; sourcePath: string }} props
+ */
+export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const containerRef = useRef(null)
   const shellRef = useRef(null)
   const editorRef = useRef(null)
   const savedRangeRef = useRef(null)
   const iframeKeydownRef = useRef(null)
+  const headAssetsRef = useRef({ links: [], css: '' })
   /** 캔버스 iframe 고정 높이(px). 코드 보기 적용 시에만 재측정 */
   const canvasFrameLockRef = useRef(null)
   const codeOpenTextRef = useRef('')
   /** RTE 링크 버튼 → 상단과 동일한 링크 모달 (selection 은 savedRangeRef 에 저장) */
   const openRteLinkModalRef = useRef(() => {})
+  /** 이미지 교체 모달 적용 대상 (선택이 바뀌어도 유지) */
+  const imageReplaceTargetRef = useRef(null)
+  const rteActiveRef = useRef(false)
 
   const [modalLink, setModalLink] = useState({ open: false, url: '' })
-  const [modalImage, setModalImage] = useState({ open: false, url: '' })
+  const [modalImage, setModalImage] = useState({ open: false, url: '', mode: 'insert' })
   const [modalVideo, setModalVideo] = useState({ open: false, url: '' })
   const [modalCode, setModalCode] = useState({ open: false, text: '' })
+  /** 코드 모달: 전체 | HTML(스크립트 제외) | CSS | 스크립트 */
+  const [codeModalTab, setCodeModalTab] = useState('all')
+  const [codeModalLoading, setCodeModalLoading] = useState(false)
   const [codeApplyState, setCodeApplyState] = useState({
     status: 'idle', // idle | applying | failure
     message: '',
@@ -790,6 +939,8 @@ export default function BlockEditor() {
     modalLink.open || modalImage.open || modalVideo.open || modalCode.open
   const anyModalOpenRef = useRef(false)
   anyModalOpenRef.current = anyModalOpen
+
+  const [imgToolbar, setImgToolbar] = useState(initialImgToolbarState)
 
   /* 링크 모달은 RTE 툴바 mousedown 캡처에서 이미 selection 저장됨 (툴바가 iframe 밖이라 click 시점엔 선택이 사라짐) */
   openRteLinkModalRef.current = () => {
@@ -804,6 +955,21 @@ export default function BlockEditor() {
 
   useEffect(() => {
     if (!containerRef.current) return undefined
+
+    let imgToolbarRaf = null
+    const scheduleImgToolbar = (maybeCmp) => {
+      if (imgToolbarRaf != null) cancelAnimationFrame(imgToolbarRaf)
+      imgToolbarRaf = requestAnimationFrame(() => {
+        imgToolbarRaf = null
+        const ed = editorRef.current
+        if (!ed || anyModalOpenRef.current || rteActiveRef.current) {
+          setImgToolbar(initialImgToolbarState)
+          return
+        }
+        const cmp = maybeCmp ?? ed.getSelected?.()
+        syncImageToolbarPosition(ed, cmp, shellRef.current, setImgToolbar)
+      })
+    }
 
     const editor = grapesjs.init({
       container: containerRef.current,
@@ -904,7 +1070,9 @@ export default function BlockEditor() {
     })
 
     const applyAutoFrameHeight = () => {
-      editor.Canvas.getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
+      // grapesjs.init() 반환값은 Editor 뷰 — Frame API는 EditorModel(em)에 있음
+      editor.getModel().getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
+      injectCanvasHeadAssets(editor, headAssetsRef.current)
       syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: false })
     }
 
@@ -922,11 +1090,15 @@ export default function BlockEditor() {
     editor.on('canvas:frame:load:body', applyAutoFrameHeight)
     editor.on('canvas:update', enforceLockedFrameSize)
 
-    editor.setComponents(initialBlockHtml)
+    const parsedInitial = splitHeadAssetsAndHtml(initialHtml)
+    headAssetsRef.current = { links: parsedInitial.links, css: parsedInitial.css }
+    editor.setComponents(parsedInitial.html)
 
     let removeRteToolbarCapture = null
+    let removeImgScrollListener = null
 
     editor.on('load', () => {
+      injectCanvasHeadAssets(editor, headAssetsRef.current)
       configureWrapper(editor)
       markEditableTree(editor.getWrapper())
       syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: false })
@@ -948,18 +1120,41 @@ export default function BlockEditor() {
         rteToolbar?.removeEventListener('pointerdown', captureRteSelectionBeforeToolbarFocus, true)
         rteToolbar?.removeEventListener('mousedown', captureRteSelectionBeforeToolbarFocus, true)
       }
+
+      const win = editor.Canvas.getWindow()
+      const onFrameScroll = () => scheduleImgToolbar()
+      win?.addEventListener('scroll', onFrameScroll, true)
+      removeImgScrollListener = () => win?.removeEventListener('scroll', onFrameScroll, true)
     })
 
     editor.on('rte:enable', () => {
+      rteActiveRef.current = true
+      setImgToolbar(initialImgToolbarState)
       mountRteFormatExtras(editor, savedRangeRef)
     })
     editor.on('rte:disable', () => {
+      rteActiveRef.current = false
       removeRteFormatExtras(editor.RichTextEditor.getToolbarEl())
+      scheduleImgToolbar()
     })
 
-    editor.on('component:selected', () => {
-      requestAnimationFrame(refreshToolStyleFromSelection)
+    const onWinResize = () => scheduleImgToolbar()
+    window.addEventListener('resize', onWinResize)
+
+    editor.on('component:selected', (cmp) => {
+      requestAnimationFrame(() => {
+        refreshToolStyleFromSelection()
+        scheduleImgToolbar(cmp)
+      })
     })
+    editor.on('component:deselected', () => {
+      setImgToolbar(initialImgToolbarState)
+    })
+    editor.on('component:update', (cmp) => {
+      const ed = editorRef.current
+      if (ed && cmp === ed.getSelected?.()) scheduleImgToolbar(cmp)
+    })
+    editor.on('canvas:update', () => scheduleImgToolbar())
 
     function handleEditorShortcuts(e, ed, checkShell) {
       const shell = shellRef.current
@@ -1042,6 +1237,9 @@ export default function BlockEditor() {
     shellEl?.addEventListener('keydown', onShellKeydown, true)
 
     return () => {
+      if (imgToolbarRaf != null) cancelAnimationFrame(imgToolbarRaf)
+      window.removeEventListener('resize', onWinResize)
+      removeImgScrollListener?.()
       removeRteToolbarCapture?.()
       if (enforceLockRaf != null) cancelAnimationFrame(enforceLockRaf)
       clearPendingFrameMeasures(editor)
@@ -1054,7 +1252,7 @@ export default function BlockEditor() {
       editor.destroy()
       editorRef.current = null
     }
-  }, [refreshToolStyleFromSelection])
+  }, [refreshToolStyleFromSelection, initialHtml])
 
   const onToolbarPointerDown = () => {
     const ed = editorRef.current
@@ -1107,47 +1305,90 @@ export default function BlockEditor() {
   const openCodeModal = () => {
     const ed = editorRef.current
     if (!ed) return
-    const css = ed.getCss() || ''
     const html = ed.getHtml() || ''
-    const text = (css.trim() ? `<style>\n${css}\n</style>\n\n` : '') + html
+    const rawHead = composeHeadAssetsMarkup(headAssetsRef.current)
+    const raw = (rawHead ? `${rawHead}\n\n` : '') + html
     setCodeApplyState({ status: 'idle', message: '', details: '' })
-    codeOpenTextRef.current = text
-    setModalCode({ open: true, text })
+    codeOpenTextRef.current = ''
+    setCodeModalTab('all')
+    setCodeModalLoading(true)
+    setModalCode({ open: true, text: raw })
+    void (async () => {
+      let next = raw
+      try {
+        next = await formatDocumentWithPrettier(raw)
+      } catch (err) {
+        console.error('코드 모달 자동 Prettier 실패:', err)
+      }
+      setModalCode((m) => (m.open ? { ...m, text: next } : m))
+      codeOpenTextRef.current = next
+      setCodeModalLoading(false)
+    })()
   }
 
   const closeCodeModal = () => {
     codeOpenTextRef.current = ''
+    setCodeModalTab('all')
+    setCodeModalLoading(false)
     setCodeApplyState({ status: 'idle', message: '', details: '' })
     setModalCode({ open: false, text: '' })
   }
 
   const formatCodeWithPrettier = async () => {
     try {
-      const prettier = await import('prettier/standalone')
-      const htmlPlugin = await import('prettier/plugins/html')
-      const postcssPlugin = await import('prettier/plugins/postcss')
-      const htmlPl = htmlPlugin.default ?? htmlPlugin
-      const postcssPl = postcssPlugin.default ?? postcssPlugin
-      const formatted = await prettier.format(modalCode.text, {
-        parser: 'html',
-        plugins: [htmlPl, postcssPl],
-        printWidth: 100,
-      })
+      const formatted = await formatDocumentWithPrettier(modalCode.text)
       setModalCode((m) => ({ ...m, text: formatted }))
+      // codeOpenTextRef 는 모달 최초 오픈 시점(자동 Prettier 완료) 문자열만 유지.
+      // 여기서 갱신하면 적용 시 "변경 없음"으로 오판해 setComponents 가 스킵되는 버그가 난다.
     } catch (err) {
       console.error('Prettier 실패:', err)
     }
   }
 
+  const codeModalSections = useMemo(() => parseCodeModalSections(modalCode.text), [modalCode.text])
+
+  const codeEditorPane = useMemo(() => {
+    switch (codeModalTab) {
+      case 'html':
+        return { value: codeModalSections.htmlOnly, language: 'html' }
+      case 'style':
+        return { value: codeModalSections.css, language: 'css' }
+      case 'script':
+        return { value: codeModalSections.scriptsJoined, language: 'html' }
+      default:
+        return { value: modalCode.text, language: 'html' }
+    }
+  }, [codeModalTab, codeModalSections, modalCode.text])
+
+  const onCodeEditorChange = useCallback(
+    (v) => {
+      const val = v ?? ''
+      if (codeModalTab === 'all') {
+        setModalCode((m) => ({ ...m, text: val }))
+        return
+      }
+      const parsed = parseCodeModalSections(modalCode.text)
+      if (codeModalTab === 'html') {
+        setModalCode((m) => ({ ...m, text: composeCodeModalSections({ ...parsed, htmlOnly: val }) }))
+      } else if (codeModalTab === 'style') {
+        setModalCode((m) => ({ ...m, text: composeCodeModalSections({ ...parsed, css: val }) }))
+      } else if (codeModalTab === 'script') {
+        setModalCode((m) => ({ ...m, text: composeCodeModalSections({ ...parsed, scriptsJoined: val }) }))
+      }
+    },
+    [codeModalTab, modalCode.text],
+  )
+
   const applyCodeModal = () => {
     const ed = editorRef.current
     if (!ed) return
+    if (codeModalLoading) return
     setCodeApplyState({ status: 'applying', message: '코드를 적용하는 중입니다...', details: '' })
     if (modalCode.text.trim() === codeOpenTextRef.current.trim()) {
       closeCodeModal()
       return
     }
-    const { css, html } = splitStyleAndHtml(modalCode.text)
+    const { links, css, html } = splitHeadAssetsAndHtml(modalCode.text)
     const nextHtml = html.trim()
     if (!nextHtml) {
       setCodeApplyState({
@@ -1170,24 +1411,13 @@ export default function BlockEditor() {
       return
     }
 
-    try {
-      ed.CssComposer?.clear?.()
-      ed.setStyle(css)
-    } catch (err) {
-      setCodeApplyState({
-        status: 'failure',
-        message: 'CSS 적용에 실패했습니다. 문법을 확인해 주세요.',
-        details: String(err?.message || err || ''),
-      })
-      return
-    }
+    headAssetsRef.current = { links, css }
+    injectCanvasHeadAssets(ed, headAssetsRef.current)
 
     try {
       configureWrapper(ed)
       markEditableTree(ed.getWrapper())
-      if (typeof ed.Canvas?.getCurrentFrameModel === 'function') {
-        ed.Canvas.getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
-      }
+      ed.getModel().getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
       syncCanvasFrameHeight(ed, canvasFrameLockRef, { reset: true })
       ed.refresh?.()
     } catch (err) {
@@ -1211,8 +1441,7 @@ export default function BlockEditor() {
   return (
     <div className="be-root" ref={shellRef}>
       <div className="be-meta">
-        블록 1 — Salon story — 편집 영역 (보내기: <code>getExportHtml(editor)</code>). 원본:{' '}
-        <code>src/block/salon.html</code>
+        {blockLabel} — 편집 영역 (보내기: <code>getExportHtml(editor)</code>). 원본: <code>{sourcePath}</code>
       </div>
 
       <div className="be-toolbar" onMouseDown={onToolbarPointerDown}>
@@ -1270,7 +1499,15 @@ export default function BlockEditor() {
         </div>
 
         <div className="be-toolbar-group">
-          <button type="button" className="be-btn" title="이미지" onClick={() => setModalImage({ open: true, url: '' })}>
+          <button
+            type="button"
+            className="be-btn"
+            title="이미지"
+            onClick={() => {
+              imageReplaceTargetRef.current = null
+              setModalImage({ open: true, url: '', mode: 'insert' })
+            }}
+          >
             <BeToolbarSvg>
               <rect x={3} y={3} width={18} height={18} rx={2} />
               <circle cx={8.5} cy={8.5} r={1.5} />
@@ -1309,6 +1546,40 @@ export default function BlockEditor() {
       <div className="be-canvas-wrap">
         <div ref={containerRef} className="be-gjs-mount" />
       </div>
+
+      {imgToolbar.visible && (
+        <div
+          role="toolbar"
+          aria-label="이미지 도구"
+          className="be-img-toolbar gjs-rte-toolbar"
+          style={{
+            position: 'absolute',
+            top: imgToolbar.top,
+            left: imgToolbar.left,
+            transform: 'translate(-50%, 0)',
+            zIndex: 30,
+          }}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          <button
+            type="button"
+            className="be-img-toolbar__btn"
+            title="다른 이미지로 교체"
+            onClick={() => {
+              const ed = editorRef.current
+              const cmp = ed?.getSelected?.()
+              if (!isImgComponent(cmp)) return
+              imageReplaceTargetRef.current = cmp
+              const attrs = cmp.getAttributes?.() || {}
+              const cur = attrs.src || ''
+              setImgToolbar(initialImgToolbarState)
+              setModalImage({ open: true, url: cur, mode: 'replace' })
+            }}
+          >
+            이미지 교체
+          </button>
+        </div>
+      )}
 
       {modalLink.open && (
         <div className="be-modal-overlay" role="dialog">
@@ -1369,7 +1640,7 @@ export default function BlockEditor() {
       {modalImage.open && (
         <div className="be-modal-overlay" role="dialog">
           <div className="be-modal">
-            <h3>이미지 삽입</h3>
+            <h3>{modalImage.mode === 'replace' ? '이미지 교체' : '이미지 삽입'}</h3>
             <div className="be-modal-body">
               <label htmlFor="be-img-file">파일 선택</label>
               <input
@@ -1394,7 +1665,14 @@ export default function BlockEditor() {
               />
             </div>
             <div className="be-modal-actions">
-              <button type="button" className="be-btn" onClick={() => setModalImage({ open: false, url: '' })}>
+              <button
+                type="button"
+                className="be-btn"
+                onClick={() => {
+                  imageReplaceTargetRef.current = null
+                  setModalImage({ open: false, url: '', mode: 'insert' })
+                }}
+              >
                 취소
               </button>
               <button
@@ -1404,11 +1682,20 @@ export default function BlockEditor() {
                   const ed = editorRef.current
                   const src = modalImage.url.trim()
                   if (!ed || !src) return
-                  insertHtmlIntoBlock(ed, `<img src="${src.replace(/"/g, '&quot;')}" alt="" style="max-width:100%;height:auto;border-radius:12px;"/>`)
-                  setModalImage({ open: false, url: '' })
+                  const mode = modalImage.mode || 'insert'
+                  if (mode === 'replace') {
+                    applyImageSrcToComponent(ed, imageReplaceTargetRef.current, src)
+                    imageReplaceTargetRef.current = null
+                  } else {
+                    insertHtmlIntoBlock(
+                      ed,
+                      `<img src="${src.replace(/"/g, '&quot;')}" alt="" style="max-width:100%;height:auto;border-radius:12px;"/>`,
+                    )
+                  }
+                  setModalImage({ open: false, url: '', mode: 'insert' })
                 }}
               >
-                이미지 삽입
+                {modalImage.mode === 'replace' ? '교체 적용' : '이미지 삽입'}
               </button>
             </div>
           </div>
@@ -1461,23 +1748,48 @@ export default function BlockEditor() {
               </button>
             </header>
             <p className="be-code-modal__desc">블록 내보내기 HTML을 편집합니다. 적용하면 편집 상태가 복원됩니다.</p>
+            <div className="be-code-modal__tabs" role="tablist" aria-label="코드 영역">
+              {[
+                { id: 'all', label: '전체' },
+                { id: 'html', label: '<html>' },
+                { id: 'style', label: '<style>' },
+                { id: 'script', label: '<script>' },
+              ].map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={codeModalTab === t.id}
+                  className={`be-code-modal__tab${codeModalTab === t.id ? ' be-code-modal__tab--active' : ''}`}
+                  disabled={codeModalLoading}
+                  onClick={() => setCodeModalTab(t.id)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
             <div className="be-modal-body be-code-modal__editor">
-              <Editor
-                height="480px"
-                defaultLanguage="html"
-                theme="vs-dark"
-                value={modalCode.text}
-                onChange={(v) => setModalCode((m) => ({ ...m, text: v || '' }))}
-                options={{
-                  fontSize: 13,
-                  lineHeight: 22,
-                  minimap: { enabled: true },
-                  wordWrap: 'on',
-                  scrollBeyondLastLine: false,
-                  automaticLayout: true,
-                  tabSize: 2,
-                }}
-              />
+              {codeModalLoading ? (
+                <div className="be-code-modal__loading">코드를 정리하는 중…</div>
+              ) : (
+                <Editor
+                  key={codeModalTab}
+                  height="480px"
+                  language={codeEditorPane.language}
+                  theme="vs-dark"
+                  value={codeEditorPane.value}
+                  onChange={onCodeEditorChange}
+                  options={{
+                    fontSize: 13,
+                    lineHeight: 22,
+                    minimap: { enabled: true },
+                    wordWrap: 'on',
+                    scrollBeyondLastLine: false,
+                    automaticLayout: true,
+                    tabSize: 2,
+                  }}
+                />
+              )}
             </div>
             {codeApplyState.status !== 'idle' && (
               <div className={`be-code-modal__notice be-code-modal__notice--${codeApplyState.status === 'applying' ? 'info' : 'error'}`}>
@@ -1486,13 +1798,18 @@ export default function BlockEditor() {
               </div>
             )}
             <div className="be-modal-actions be-code-modal__foot">
-              <button type="button" className="be-btn" onClick={formatCodeWithPrettier}>
+              <button type="button" className="be-btn" onClick={formatCodeWithPrettier} disabled={codeModalLoading}>
                 Prettier로 정리
               </button>
               <button type="button" className="be-btn" onClick={closeCodeModal}>
                 취소
               </button>
-              <button type="button" className="be-btn be-btn-primary" onClick={applyCodeModal} disabled={codeApplyState.status === 'applying'}>
+              <button
+                type="button"
+                className="be-btn be-btn-primary"
+                onClick={applyCodeModal}
+                disabled={codeApplyState.status === 'applying' || codeModalLoading}
+              >
                 적용
               </button>
             </div>

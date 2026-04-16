@@ -2,6 +2,7 @@
   --be-toolbar-h: 52px;
   --be-meta-h: 36px;
   min-height: 100vh;
+  position: relative;
   display: flex;
   flex-direction: column;
   background: #f1f5f9;
@@ -310,6 +311,39 @@
   flex: 0 0 auto;
 }
 
+/* 이미지 선택 시 플로팅 툴바 (텍스트 RTE 툴바와 시각 톤 통일) */
+.be-img-toolbar {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.15);
+  pointer-events: auto;
+}
+
+.be-img-toolbar__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.be-img-toolbar__btn:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
 .be-rte-extras {
   display: inline-flex;
   flex-wrap: wrap;
@@ -567,6 +601,51 @@
   color: #94a3b8;
   border-bottom: 1px solid #333;
   background: #252526;
+}
+
+.be-code-modal__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px;
+  background: #252526;
+  border-bottom: 1px solid #333;
+}
+
+.be-code-modal__tab {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  background: #1e1e1e;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.be-code-modal__tab:hover:not(:disabled) {
+  border-color: #52525b;
+  color: #e2e8f0;
+}
+
+.be-code-modal__tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.be-code-modal__tab--active {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.2);
+  color: #fff;
+}
+
+.be-code-modal__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 480px;
+  font-size: 13px;
+  color: #94a3b8;
 }
 
 .be-code-modal__editor {

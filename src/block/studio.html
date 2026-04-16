@@ -1,0 +1,422 @@
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css">
+<style>
+  :root {
+    /* 베이지 대신: 세이지에 가까운 밝은 페이퍼(2섹션 #eef0ea와 톤은 같되 더 밝게) */
+    --bg: #f4f7f5;
+    --text: #1f1f1f;
+    --muted: rgba(31, 31, 31, 0.62);
+    --line: rgba(31, 31, 31, 0.1);
+    --point: #8fa38d;
+    --point-dark: #6f826d;
+    --surface: #ffffff;
+    --gradient-text: linear-gradient(
+      120deg,
+      #1f1f1f 0%,
+      #4a5c48 48%,
+      #8fa38d 100%
+    );
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  /* 전체 배경: 변수만 쓰면 상위 CMS/템플릿에서 묻히는 경우가 있어
+     html·body 리터럴 색 + 루트 래퍼 이중으로 깔아 줌 */
+  html {
+    min-height: 100%;
+    background-color: #f4f7f5;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100%;
+    min-height: 100dvh;
+    font-family: "Pretendard", -apple-system, BlinkMacSystemFont, system-ui,
+      sans-serif;
+    color: var(--text);
+    background-color: #f4f7f5;
+  }
+
+  .studio-root {
+    min-height: 100vh;
+    min-height: 100dvh;
+    width: 100%;
+    background-color: #f4f7f5;
+    color: var(--text);
+    background-image: radial-gradient(
+        880px 500px at 10% 0%,
+        rgba(143, 163, 141, 0.11),
+        transparent 56%
+      ),
+      radial-gradient(
+        720px 420px at 92% 12%,
+        rgba(232, 240, 235, 0.75),
+        transparent 58%
+      ),
+      linear-gradient(180deg, #f8faf9 0%, #f1f5f2 40%, #e6ece8 100%);
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+  }
+
+  /* —— 첫 섹션: 히어로 —— */
+  .hero {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: clamp(36px, 6vw, 72px) clamp(20px, 5vw, 48px) 0;
+  }
+
+  .hero__grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    gap: clamp(32px, 5vw, 64px);
+    align-items: end;
+  }
+
+  @media (max-width: 900px) {
+    .hero__grid {
+      grid-template-columns: 1fr;
+      align-items: start;
+    }
+  }
+
+  .hero__eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 14px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--point);
+  }
+
+  .hero__eyebrow::before {
+    content: "";
+    width: 28px;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--point);
+    opacity: 0.85;
+  }
+
+  .hero__title {
+    margin: 0 0 20px;
+    font-size: clamp(32px, 4.6vw, 52px);
+    font-weight: 800;
+    line-height: 1.12;
+    letter-spacing: -0.045em;
+    background: var(--gradient-text);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+
+  .hero__lead {
+    margin: 0 0 28px;
+    max-width: 34em;
+    font-size: clamp(15px, 1.35vw, 17px);
+    line-height: 1.75;
+    color: var(--muted);
+  }
+
+  .hero__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+
+  .hero__btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 14px 22px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease,
+      background 0.2s ease, border-color 0.2s ease;
+  }
+
+  .hero__btn--primary {
+    color: #fff;
+    background: var(--point);
+    box-shadow: 0 14px 36px rgba(143, 163, 141, 0.35);
+  }
+
+  .hero__btn--primary:hover {
+    background: var(--point-dark);
+    transform: translateY(-1px);
+  }
+
+  .hero__btn--ghost {
+    color: var(--text);
+    background: var(--surface);
+    border-color: var(--line);
+  }
+
+  .hero__btn--ghost:hover {
+    border-color: rgba(143, 163, 141, 0.55);
+  }
+
+  .hero__meta {
+    display: grid;
+    gap: 14px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line);
+  }
+
+  .hero__meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+
+  .hero__meta-row strong {
+    font-weight: 700;
+    color: rgba(31, 31, 31, 0.88);
+  }
+
+  /* 우측: 요약 패널 (카드형이 아닌 인포 블록) */
+  .hero__aside {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 22px 22px 20px;
+    box-shadow: 0 18px 50px rgba(31, 31, 31, 0.06);
+  }
+
+  .hero__aside-title {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--point);
+  }
+
+  .hero__aside-name {
+    margin: 0 0 16px;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+  }
+
+  .hero__aside-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 10px;
+  }
+
+  .hero__aside-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--muted);
+  }
+
+  .hero__aside-list li::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    margin-top: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--point);
+    opacity: 0.75;
+  }
+
+  /* —— 하단: 무드 갤러리 (Swiper 루프 트랙) —— */
+  .hero-gallery {
+    margin-top: clamp(40px, 6vw, 64px);
+    padding-bottom: clamp(40px, 7vw, 80px);
+  }
+
+  .hero-gallery__head {
+    max-width: 1200px;
+    margin: 0 auto 16px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px 20px;
+  }
+
+  .hero-gallery__title {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+
+  .hero-gallery__hint {
+    margin: 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .outer-swiper-wrapper {
+    position: relative;
+    width: 100%;
+    height: clamp(248px, 31vw, 356px);
+    overflow: hidden;
+  }
+
+  .outer-swiper {
+    width: 100%;
+    height: 100%;
+  }
+
+  .outer-swiper-slide {
+    width: auto !important;
+  }
+
+  .outer-slide {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+  }
+
+  .outer-slide img {
+    display: block;
+    width: min(440px, 82vw);
+    height: clamp(220px, 29vw, 356px);
+    object-fit: cover;
+    border-radius: 12px;
+    box-shadow: 0 16px 44px rgba(31, 31, 31, 0.1);
+    background: #e8e4dc;
+  }
+</style>
+<div class="studio-root">
+  <main>
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero__grid">
+        <div class="hero__copy">
+          <p class="hero__eyebrow">Photo · Film · Print</p>
+          <h1 class="hero__title" id="hero-title"> 빛으로 남기는 오늘, <br> 오래 보는 한 장 </h1>
+          <p class="hero__lead"> 인물 · 웨딩 · 가족 촬영을 자연광과 스튜디오 조명으로 담습니다. 촬영 후 현장 픽업·택배 인화까지 한 공간에서 마무리할 수 있도록 구성했습니다. </p>
+          <div class="hero__actions">
+            <a class="hero__btn hero__btn--primary"
+              href="javascript:GoSubBoard(&quot;sub02&quot;,&quot;예약·문의&quot;,&quot;&quot;,&quot;table_1776039954&quot;)">촬영
+              예약</a>
+            <a class="hero__btn hero__btn--ghost"
+              href="javascript:GoSubBoard(&quot;sub02&quot;,&quot;포트폴리오&quot;,&quot;&quot;,&quot;table_1776040826&quot;)">포트폴리오
+              보기</a>
+          </div>
+          <div class="hero__meta">
+            <div class="hero__meta-row">
+              <strong>운영</strong> 화–일 10:00–19:00 · 월 정기 휴무
+            </div>
+            <div class="hero__meta-row">
+              <strong>문의</strong> 02-0000-0000 · 서울 OO구 OO로 00
+            </div>
+          </div>
+        </div>
+        <aside class="hero__aside" aria-label="촬영 스튜디오 요약">
+          <p class="hero__aside-title">This week</p>
+          <h2 class="hero__aside-name">촬영 전 체크</h2>
+          <ul class="hero__aside-list">
+            <li>의상 2벌까지 무료 보관 · 탈의실 완비</li>
+            <li>가족 세트는 최대 6인 기준 안내</li>
+            <li>원본은 촬영일 기준 14일 내 클라우드 제공</li>
+          </ul>
+        </aside>
+      </div>
+      <div class="hero-gallery">
+        <div class="hero-gallery__head">
+          <h2 class="hero-gallery__title">무드 레퍼런스</h2>
+          <p class="hero-gallery__hint">최근 스튜디오 톤을 한눈에</p>
+        </div>
+        <div class="outer-swiper-wrapper">
+          <div
+            class="swiper outer-swiper swiper-initialized swiper-horizontal swiper-watch-progress swiper-backface-hidden">
+            <div class="swiper-wrapper" id="swiper-wrapper-d942c6fccbd37a7a" aria-live="off"
+              style="transition-duration: 2500ms; transform: translate3d(-1033px, 0px, 0px);">
+              <div class="swiper-slide outer-swiper-slide" data-swiper-slide-index="0" role="group" aria-label="1 / 6"
+                style="margin-right: 15px;">
+                <div class="outer-slide">
+                  <img src="https://i-web.kr/iweb-TJc005/images/main1-6.jpg" alt="패션 촬영" width="440" height="356"
+                    decoding="async">
+                </div>
+              </div>
+              <div class="swiper-slide outer-swiper-slide" data-swiper-slide-index="1" role="group" aria-label="2 / 6"
+                style="margin-right: 15px;">
+                <div class="outer-slide">
+                  <img src="https://i-web.kr/iweb-TJc005/images/main1-1.jpg" alt="스튜디오 인물 촬영" width="440" height="356"
+                    decoding="async">
+                </div>
+              </div>
+              <div class="swiper-slide outer-swiper-slide swiper-slide-visible swiper-slide-prev"
+                data-swiper-slide-index="2" role="group" aria-label="3 / 6" style="margin-right: 15px;">
+                <div class="outer-slide">
+                  <img src="https://i-web.kr/iweb-TJc005/images/main1-2.jpg" alt="웨딩 스튜디오" width="440" height="356"
+                    decoding="async">
+                </div>
+              </div>
+              <div
+                class="swiper-slide outer-swiper-slide swiper-slide-visible swiper-slide-fully-visible swiper-slide-active"
+                data-swiper-slide-index="3" role="group" aria-label="4 / 6" style="margin-right: 15px;">
+                <div class="outer-slide">
+                  <img src="https://i-web.kr/iweb-TJc005/images/main1-3.jpg" alt="가족 사진" width="440" height="356"
+                    decoding="async">
+                </div>
+              </div>
+              <div class="swiper-slide outer-swiper-slide swiper-slide-visible swiper-slide-next"
+                data-swiper-slide-index="4" role="group" aria-label="5 / 6" style="margin-right: 15px;">
+                <div class="outer-slide">
+                  <img src="https://i-web.kr/iweb-TJc005/images/main1-4.jpg" alt="스튜디오 조명" width="440" height="356"
+                    decoding="async">
+                </div>
+              </div>
+              <div class="swiper-slide outer-swiper-slide" data-swiper-slide-index="5" role="group" aria-label="6 / 6"
+                style="margin-right: 15px;">
+                <div class="outer-slide">
+                  <img src="https://i-web.kr/iweb-TJc005/images/main1-5.jpg" alt="포트레이트" width="440" height="356"
+                    decoding="async">
+                </div>
+              </div>
+            </div>
+            <span class="swiper-notification" aria-live="assertive" aria-atomic="true"></span><span
+              class="swiper-notification" aria-live="assertive" aria-atomic="true"></span><span
+              class="swiper-notification" aria-live="assertive" aria-atomic="true"></span><span
+              class="swiper-notification" aria-live="assertive" aria-atomic="true"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
+<script>
+  new Swiper(".outer-swiper", {
+    autoplay: {
+      delay: 1000,
+      disableOnInteraction: false,
+    },
+    speed: 2500,
+    loop: true,
+    slidesPerView: "auto",
+    centeredSlides: true,
+    spaceBetween: 15,
+    allowTouchMove: false,
+    watchSlidesProgress: true,
+  });
+</script>
