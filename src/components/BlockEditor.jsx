@@ -44,6 +44,9 @@ function getBlockRootComponent(editor) {
   )
 }
 
+const COMPONENT_LINK_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3.9,12C3.9,10.29 5.29,8.9 7,8.9H11V7H7A5,5 0 0,0 2,12A5,5 0 0,0 7,17H11V15.1H7C5.29,15.1 3.9,13.71 3.9,12M8,13H16V11H8V13M17,7H13V8.9H17C18.71,8.9 20.1,10.29 20.1,12C20.1,13.71 18.71,15.1 17,15.1H13V17H17A5,5 0 0,0 22,12A5,5 0 0,0 17,7Z"></path></svg>'
+
 const GJS_COMPONENT_DEFAULTS = {
   draggable: true,
   droppable: true,
@@ -72,6 +75,12 @@ const GJS_COMPONENT_DEFAULTS = {
       attributes: { title: '요소 배경색' },
     },
     {
+      id: 'lnk',
+      label: COMPONENT_LINK_ICON_SVG,
+      command: 'custom:component-link',
+      attributes: { title: '링크 설정' },
+    },
+    {
       id: 'cpy',
       label: '⎘',
       command: 'core:copy',
@@ -98,14 +107,49 @@ const GJS_COMPONENT_DEFAULTS = {
   ],
 }
 
+const IMAGE_RESIZE_HANDLES = {
+  tl: 1,
+  tc: 1,
+  tr: 1,
+  cl: 1,
+  cr: 1,
+  bl: 1,
+  bc: 1,
+  br: 1,
+  keyWidth: 'width',
+  keyHeight: 'height',
+}
+
+const COMPONENT_LINK_TOOLBAR_ITEM = {
+  id: 'lnk',
+  label: COMPONENT_LINK_ICON_SVG,
+  command: 'custom:component-link',
+  attributes: { title: '링크 설정' },
+}
+
+function withComponentLinkToolbar(toolbar) {
+  const base = Array.isArray(toolbar) ? [...toolbar] : []
+  const exists = base.some((it) => it?.id === COMPONENT_LINK_TOOLBAR_ITEM.id || it?.command === COMPONENT_LINK_TOOLBAR_ITEM.command)
+  if (exists) return base
+  const delIdx = base.findIndex((it) => it?.command === 'core:component-delete')
+  if (delIdx >= 0) {
+    base.splice(delIdx, 0, { ...COMPONENT_LINK_TOOLBAR_ITEM })
+  } else {
+    base.push({ ...COMPONENT_LINK_TOOLBAR_ITEM })
+  }
+  return base
+}
+
 function markEditableTree(component) {
+  const nextToolbar = withComponentLinkToolbar(component.get?.('toolbar'))
   const tag = (component.get('tagName') || '').toLowerCase()
   if (['img', 'br', 'hr', 'svg', 'path'].includes(tag)) {
     if (tag === 'img') {
       component.set({
         editable: false,
         draggable: true,
-        resizable: true,
+        resizable: { ...IMAGE_RESIZE_HANDLES },
+        toolbar: nextToolbar,
       })
     }
     return
@@ -117,6 +161,11 @@ function markEditableTree(component) {
       selectable: true,
       hoverable: true,
       highlightable: true,
+      toolbar: nextToolbar,
+    })
+  } else {
+    component.set({
+      toolbar: nextToolbar,
     })
   }
 }
@@ -204,10 +253,11 @@ function wrapSelectionForPendingLink(rte) {
 function unwrapPendingLinkInCanvas(editor) {
   const doc = editor.Canvas.getDocument()
   const el = doc.querySelector(`[${LINK_PENDING_ATTR}]`)
-  if (!el?.parentNode) return
+  if (!el?.parentNode) return null
   const parent = el.parentNode
   while (el.firstChild) parent.insertBefore(el.firstChild, el)
   parent.removeChild(el)
+  return parent?.nodeType === 1 ? parent : null
 }
 
 function applyPendingLinkInCanvas(editor, hrefRaw) {
@@ -224,6 +274,15 @@ function applyPendingLinkInCanvas(editor, hrefRaw) {
   pending.replaceWith(a)
   notifyGrapesInputFromDomNode(editor, a)
   return true
+}
+
+function syncRteLinkChangeToModel(editor, nodeHint) {
+  if (!editor) return
+  if (nodeHint) notifyGrapesInputFromDomNode(editor, nodeHint)
+  const selectedView = editor.getSelected?.()?.getView?.()
+  if (typeof selectedView?.onInput === 'function') {
+    selectedView.onInput()
+  }
 }
 
 /** 프로그램matic DOM 변경 후 Grapes 텍스트 컴포넌트에 input 과 동일하게 동기화 */
@@ -629,6 +688,121 @@ function composeHeadAssetsMarkup({ links = [], css = '' }) {
   return [linkPart, stylePart].filter(Boolean).join('\n\n').trim()
 }
 
+function convertImageLinkMetaToAnchors(html) {
+  const src = String(html || '')
+  if (!src.trim()) return ''
+  if (typeof DOMParser === 'undefined') return src
+
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    const body = doc.body
+
+    // 링크 삽입 중 임시 마커는 최종/내보내기 코드에 남기지 않는다.
+    body.querySelectorAll(`[${LINK_PENDING_ATTR}]`).forEach((el) => {
+      const parent = el.parentNode
+      if (!parent) return
+      while (el.firstChild) parent.insertBefore(el.firstChild, el)
+      parent.removeChild(el)
+    })
+
+    const images = body.querySelectorAll(`img[${IMG_LINK_DATA_HREF}]`)
+
+    images.forEach((img) => {
+      const href = (img.getAttribute(IMG_LINK_DATA_HREF) || '').trim()
+      const target = (img.getAttribute(IMG_LINK_DATA_TARGET) || '_blank').trim() || '_blank'
+      const rel = (img.getAttribute(IMG_LINK_DATA_REL) || 'noopener noreferrer').trim() || 'noopener noreferrer'
+
+      img.removeAttribute(IMG_LINK_DATA_HREF)
+      img.removeAttribute(IMG_LINK_DATA_TARGET)
+      img.removeAttribute(IMG_LINK_DATA_REL)
+      if (!href) return
+
+      const parent = img.parentElement
+      if (parent?.tagName === 'A') {
+        parent.setAttribute('href', href)
+        parent.setAttribute('target', target)
+        parent.setAttribute('rel', rel)
+        return
+      }
+
+      const a = doc.createElement('a')
+      a.setAttribute('href', href)
+      a.setAttribute('target', target)
+      a.setAttribute('rel', rel)
+      parent?.insertBefore(a, img)
+      a.appendChild(img)
+    })
+
+    return body.innerHTML
+  } catch {
+    return src
+  }
+}
+
+function convertAnchoredImagesToLinkMeta(html) {
+  const src = String(html || '')
+  if (!src.trim()) return ''
+  if (typeof DOMParser === 'undefined') return src
+
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    const body = doc.body
+    const anchors = body.querySelectorAll('a[href]')
+
+    anchors.forEach((a) => {
+      const imgs = Array.from(a.querySelectorAll('img'))
+      if (imgs.length !== 1) return
+      const img = imgs[0]
+      const href = (a.getAttribute('href') || '').trim()
+      if (!href) return
+      const target = (a.getAttribute('target') || '_blank').trim() || '_blank'
+      const rel = (a.getAttribute('rel') || 'noopener noreferrer').trim() || 'noopener noreferrer'
+
+      img.setAttribute(IMG_LINK_DATA_HREF, href)
+      img.setAttribute(IMG_LINK_DATA_TARGET, target)
+      img.setAttribute(IMG_LINK_DATA_REL, rel)
+      a.replaceWith(img)
+    })
+
+    return body.innerHTML
+  } catch {
+    return src
+  }
+}
+
+function getCanvasDomHtmlSnapshot(editor) {
+  try {
+    const doc = editor?.Canvas?.getDocument?.()
+    const body = doc?.body
+    if (!body) return ''
+    const clone = body.cloneNode(true)
+    clone.querySelectorAll('*').forEach((el) => {
+      Array.from(el.attributes || []).forEach((attr) => {
+        const name = String(attr.name || '')
+        if (name.startsWith('data-gjs-')) el.removeAttribute(name)
+      })
+      // 편집 중 런타임 속성 제거
+      if (el.getAttribute('contenteditable') != null) el.removeAttribute('contenteditable')
+      if (el.getAttribute('draggable') === 'true') el.removeAttribute('draggable')
+      if (el.getAttribute('spellcheck') != null) el.removeAttribute('spellcheck')
+    })
+    return clone.innerHTML || ''
+  } catch {
+    return ''
+  }
+}
+
+function getExportHtml(editor, headAssets) {
+  if (!editor) return ''
+  const domHtml = getCanvasDomHtmlSnapshot(editor)
+  const sourceHtml = domHtml || editor.getHtml() || ''
+  const html = convertImageLinkMetaToAnchors(sourceHtml)
+  const head = composeHeadAssetsMarkup(headAssets || {})
+  return (head ? `${head}\n\n` : '') + html
+}
+
 function injectCanvasHeadAssets(editor, { links = [], css = '' }) {
   const doc = editor.Canvas.getDocument()
   const head = doc?.head
@@ -865,6 +1039,74 @@ function isImgComponent(cmp) {
   return type === 'image'
 }
 
+function findClosestAnchorComponent(component) {
+  let cur = component
+  while (cur) {
+    const tag = (cur.get('tagName') || '').toLowerCase()
+    if (tag === 'a') return cur
+    cur = cur.parent?.()
+  }
+  return null
+}
+
+const IMG_LINK_DATA_HREF = 'data-be-link-href'
+const IMG_LINK_DATA_TARGET = 'data-be-link-target'
+const IMG_LINK_DATA_REL = 'data-be-link-rel'
+
+function getImageLinkData(component) {
+  const attrs = component?.getAttributes?.() || {}
+  return {
+    href: String(attrs[IMG_LINK_DATA_HREF] || '').trim(),
+    target: String(attrs[IMG_LINK_DATA_TARGET] || '_blank'),
+    rel: String(attrs[IMG_LINK_DATA_REL] || 'noopener noreferrer'),
+  }
+}
+
+function getFirstImageChild(component) {
+  if (!component?.find) return null
+  return component.find('img')?.[0] || null
+}
+
+function normalizeImageLinkPair(anchorComponent, imageComponent) {
+  try {
+    anchorComponent?.set?.({
+      selectable: false,
+      hoverable: false,
+      highlightable: false,
+      droppable: false,
+      editable: false,
+    })
+    imageComponent?.set?.({
+      selectable: true,
+      hoverable: true,
+      highlightable: true,
+      draggable: true,
+      resizable: { ...IMAGE_RESIZE_HANDLES },
+      editable: false,
+      toolbar: withComponentLinkToolbar(imageComponent.get?.('toolbar')),
+    })
+  } catch {
+    /* ignore */
+  }
+}
+
+function ensureImageLinkWrapper(editor, imageComponent) {
+  if (!editor || !isImgComponent(imageComponent)) return imageComponent
+  const { href, target, rel } = getImageLinkData(imageComponent)
+  if (!href) return imageComponent
+
+  const anchor = findClosestAnchorComponent(imageComponent)
+  if (anchor) {
+    anchor.addAttributes({ href, target, rel })
+    normalizeImageLinkPair(anchor, imageComponent)
+    return imageComponent
+  }
+
+  // 편집 중에는 <a><img/></a>로 구조를 바꾸지 않는다.
+  // 래핑 교체는 GrapesJS에서 이미지 컴포넌트/핸들 상태를 깨뜨려 리사이즈가 풀리는 원인이 됨.
+  return imageComponent
+}
+
 function syncImageToolbarPosition(editor, cmp, shellEl, setImgToolbar) {
   if (!isImgComponent(cmp)) {
     setImgToolbar(initialImgToolbarState)
@@ -892,6 +1134,9 @@ function applyImageSrcToComponent(editor, component, srcRaw) {
   const src = String(srcRaw || '').trim()
   if (!editor || !component || !src) return
   try {
+    if (typeof component.set === 'function') {
+      component.set('src', src)
+    }
     component.addAttributes({ src })
     const el = component.getEl?.()
     if (el) {
@@ -901,6 +1146,49 @@ function applyImageSrcToComponent(editor, component, srcRaw) {
   } catch {
     /* ignore */
   }
+}
+
+function applyLinkToComponent(editor, component, hrefRaw) {
+  const href = String(hrefRaw || '').trim()
+  if (!editor || !component || !href) return false
+  const attrs = {
+    href,
+    target: '_blank',
+    rel: 'noopener noreferrer',
+  }
+
+  const innerImage = getFirstImageChild(component)
+  if (innerImage) {
+    return applyLinkToComponent(editor, innerImage, href)
+  }
+
+  if (isImgComponent(component)) {
+    component.addAttributes({
+      [IMG_LINK_DATA_HREF]: href,
+      [IMG_LINK_DATA_TARGET]: attrs.target,
+      [IMG_LINK_DATA_REL]: attrs.rel,
+    })
+    const next = ensureImageLinkWrapper(editor, component)
+    if (next) editor.select(next)
+    return true
+  }
+
+  const anchor = findClosestAnchorComponent(component)
+  if (anchor) {
+    anchor.addAttributes(attrs)
+    editor.select(anchor)
+    return true
+  }
+
+  const html = component.toHTML?.()
+  if (!html || typeof component.replaceWith !== 'function') return false
+  const escapedHref = href.replace(/"/g, '&quot;')
+  const wrapped = component.replaceWith(
+    `<a href="${escapedHref}" target="_blank" rel="noopener noreferrer">${html}</a>`,
+  )
+  const next = Array.isArray(wrapped) ? wrapped[0] : wrapped
+  if (next) editor.select(next)
+  return true
 }
 
 /**
@@ -920,9 +1208,11 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const openRteLinkModalRef = useRef(() => {})
   /** 이미지 교체 모달 적용 대상 (선택이 바뀌어도 유지) */
   const imageReplaceTargetRef = useRef(null)
+  /** 요소 툴바 링크 버튼 적용 대상 */
+  const componentLinkTargetRef = useRef(null)
   const rteActiveRef = useRef(false)
 
-  const [modalLink, setModalLink] = useState({ open: false, url: '' })
+  const [modalLink, setModalLink] = useState({ open: false, url: '', mode: 'rte' })
   const [modalImage, setModalImage] = useState({ open: false, url: '', mode: 'insert' })
   const [modalVideo, setModalVideo] = useState({ open: false, url: '' })
   const [modalCode, setModalCode] = useState({ open: false, text: '' })
@@ -944,7 +1234,8 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
 
   /* 링크 모달은 RTE 툴바 mousedown 캡처에서 이미 selection 저장됨 (툴바가 iframe 밖이라 click 시점엔 선택이 사라짐) */
   openRteLinkModalRef.current = () => {
-    setModalLink({ open: true, url: '' })
+    componentLinkTargetRef.current = null
+    setModalLink({ open: true, url: '', mode: 'rte' })
   }
 
   const refreshToolStyleFromSelection = useCallback(() => {
@@ -1034,6 +1325,30 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     editorRef.current = editor
     editor.Keymaps.removeAll()
 
+    // GrapesJS 기본 이미지 뷰는 dblclick 시 AssetManager(Select Image)를 여는 onActive를 호출한다.
+    // 우리 에디터는 커스텀 "이미지 교체" UX를 사용하므로, 이미지 더블클릭만 비활성화한다.
+    const imageType = editor.DomComponents.getType('image')
+    const BaseImageView = imageType?.view
+    if (BaseImageView?.extend) {
+      editor.DomComponents.addType('image', {
+        model: imageType.model,
+        view: BaseImageView.extend({
+          events() {
+            const baseEvents =
+              (typeof BaseImageView.prototype.events === 'function'
+                ? BaseImageView.prototype.events.call(this)
+                : BaseImageView.prototype.events) || {}
+            const nextEvents = { ...baseEvents }
+            delete nextEvents.dblclick
+            return nextEvents
+          },
+          onActive(ev) {
+            ev?.stopPropagation?.()
+          },
+        }),
+      })
+    }
+
     editor.Commands.add('custom:cut', {
       run(ed) {
         ed.runCommand('core:copy')
@@ -1052,6 +1367,24 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
           sel.addStyle({ 'background-color': input.value })
         }
         input.click()
+      },
+    })
+
+    editor.Commands.add('custom:component-link', {
+      run(ed) {
+        const selected = ed.getSelected()
+        if (!selected) return
+        const target = getFirstImageChild(selected) || selected
+        const anchor = findClosestAnchorComponent(target)
+        const attrs = anchor?.getAttributes?.() || target.getAttributes?.() || {}
+        const imgLink = getImageLinkData(target)
+        componentLinkTargetRef.current = target
+        setImgToolbar(initialImgToolbarState)
+        setModalLink({
+          open: true,
+          url: String(attrs.href || imgLink.href || ''),
+          mode: 'component',
+        })
       },
     })
 
@@ -1143,6 +1476,19 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
 
     editor.on('component:selected', (cmp) => {
       requestAnimationFrame(() => {
+        // 링크 래퍼(<a>)가 선택된 경우 내부 이미지를 즉시 선택해 리사이즈 핸들을 유지
+        const linkedImage = getFirstImageChild(cmp)
+        if (linkedImage && cmp !== linkedImage) {
+          normalizeImageLinkPair(cmp, linkedImage)
+          editor.select(linkedImage)
+          scheduleImgToolbar(linkedImage)
+          return
+        }
+        if (cmp?.set) {
+          cmp.set({
+            toolbar: withComponentLinkToolbar(cmp.get?.('toolbar')),
+          })
+        }
         refreshToolStyleFromSelection()
         scheduleImgToolbar(cmp)
       })
@@ -1153,6 +1499,17 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     editor.on('component:update', (cmp) => {
       const ed = editorRef.current
       if (ed && cmp === ed.getSelected?.()) scheduleImgToolbar(cmp)
+    })
+    editor.on('component:drag:end', (payload) => {
+      const ed = editorRef.current
+      if (!ed) return
+      const dragged = payload?.target || payload
+      if (!isImgComponent(dragged)) return
+      const next = ensureImageLinkWrapper(ed, dragged)
+      if (next) {
+        if (ed.getSelected?.() === dragged) ed.select(next)
+        scheduleImgToolbar(next)
+      }
     })
     editor.on('canvas:update', () => scheduleImgToolbar())
 
@@ -1305,9 +1662,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const openCodeModal = () => {
     const ed = editorRef.current
     if (!ed) return
-    const html = ed.getHtml() || ''
-    const rawHead = composeHeadAssetsMarkup(headAssetsRef.current)
-    const raw = (rawHead ? `${rawHead}\n\n` : '') + html
+    const raw = getExportHtml(ed, headAssetsRef.current)
     setCodeApplyState({ status: 'idle', message: '', details: '' })
     codeOpenTextRef.current = ''
     setCodeModalTab('all')
@@ -1389,7 +1744,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       return
     }
     const { links, css, html } = splitHeadAssetsAndHtml(modalCode.text)
-    const nextHtml = html.trim()
+    const nextHtml = convertAnchoredImagesToLinkMeta(html).trim()
     if (!nextHtml) {
       setCodeApplyState({
         status: 'failure',
@@ -1434,7 +1789,10 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   }
 
   const handleSave = () => {
-    if (!editorRef.current) return
+    const ed = editorRef.current
+    if (!ed) return
+    const exported = getExportHtml(ed, headAssetsRef.current)
+    console.log(exported)
     console.log('저장이 완료되었습니다!')
   }
 
@@ -1601,8 +1959,9 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                 className="be-btn"
                 onClick={() => {
                   const ed = editorRef.current
-                  if (ed) unwrapPendingLinkInCanvas(ed)
-                  setModalLink({ open: false, url: '' })
+                  if (ed && modalLink.mode === 'rte') unwrapPendingLinkInCanvas(ed)
+                  componentLinkTargetRef.current = null
+                  setModalLink({ open: false, url: '', mode: 'rte' })
                 }}
               >
                 취소
@@ -1614,20 +1973,30 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                   const ed = editorRef.current
                   const url = modalLink.url.trim()
                   if (!ed || !url) return
-                  ed.Canvas.getFrameEl()?.contentWindow?.focus()
-                  if (!applyPendingLinkInCanvas(ed, url)) {
-                    restoreIframeSelection(ed, savedRangeRef)
-                    ed.Canvas.getDocument().execCommand('createLink', false, url)
-                    try {
-                      const doc = ed.Canvas.getDocument()
-                      const sel = doc.getSelection()
-                      const n = sel?.anchorNode
-                      if (n) notifyGrapesInputFromDomNode(ed, n)
-                    } catch {
-                      /* ignore */
+                  if (modalLink.mode === 'component') {
+                    const target = componentLinkTargetRef.current || ed.getSelected?.()
+                    if (!target || !applyLinkToComponent(ed, target, url)) return
+                  } else {
+                    let syncNode = null
+                    ed.Canvas.getFrameEl()?.contentWindow?.focus()
+                    if (!applyPendingLinkInCanvas(ed, url)) {
+                      restoreIframeSelection(ed, savedRangeRef)
+                      ed.Canvas.getDocument().execCommand('createLink', false, url)
+                      try {
+                        const doc = ed.Canvas.getDocument()
+                        const sel = doc.getSelection()
+                        const n = sel?.anchorNode
+                        if (n) syncNode = n
+                      } catch {
+                        /* ignore */
+                      }
                     }
+                    // 어떤 경로로든 임시 마커가 남지 않게 마지막에 한 번 정리
+                    const unwrappedParent = unwrapPendingLinkInCanvas(ed)
+                    syncRteLinkChangeToModel(ed, unwrappedParent || syncNode)
                   }
-                  setModalLink({ open: false, url: '' })
+                  componentLinkTargetRef.current = null
+                  setModalLink({ open: false, url: '', mode: 'rte' })
                 }}
               >
                 삽입 완료
