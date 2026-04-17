@@ -348,23 +348,72 @@ function getFontSizePxFromSelection(doc, win) {
   return Number.isFinite(fs) ? Math.round(fs) : 16
 }
 
-/** 선택 영역 안의 인라인 font-size / FONT size 를 제거해 한 겹 래핑으로 통일할 때 사용 */
-function stripFontSizingFromFragment(fragment) {
-  const visit = (node) => {
-    if (node.nodeType === 1) {
-      const el = node
-      if (el.tagName === 'FONT') {
-        el.removeAttribute('size')
-      }
-      el.style?.removeProperty?.('font-size')
-      const st = el.getAttribute('style')
-      if (st !== null && (!String(st).trim())) el.removeAttribute('style')
-    }
-    const kids = node.childNodes ? [...node.childNodes] : []
-    kids.forEach(visit)
+/** RTE 글자 크기를 span 래핑 대신 부여할 블록(또는 인라인 대체) 호스트 */
+const RTE_FS_BLOCK_TAGS = new Set([
+  'p',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'li',
+  'td',
+  'th',
+  'blockquote',
+  'figcaption',
+  'div',
+])
+
+function findRteFontSizeHostElement(node) {
+  let el = node?.nodeType === 3 ? node.parentElement : node
+  let inlineCandidate = null
+  while (el && el.nodeType === 1) {
+    const tag = el.tagName.toLowerCase()
+    if (tag === 'body' || tag === 'html') break
+    if (RTE_FS_BLOCK_TAGS.has(tag)) return el
+    if (TOOLBAR_TEXT_TAGS.has(tag)) inlineCandidate = inlineCandidate || el
+    el = el.parentElement
   }
-  if (!fragment) return
-  ;[...fragment.childNodes].forEach(visit)
+  return inlineCandidate
+}
+
+function collectRteFontSizeHostElements(doc, range) {
+  const hosts = new Set()
+  const add = (n) => {
+    const h = findRteFontSizeHostElement(n)
+    if (h) hosts.add(h)
+  }
+
+  if (range.collapsed) {
+    add(range.startContainer)
+    return [...hosts]
+  }
+
+  const ca = range.commonAncestorContainer
+  const root = ca.nodeType === 1 ? ca : ca.parentElement
+  if (!root) {
+    add(range.startContainer)
+    add(range.endContainer)
+    return [...hosts]
+  }
+
+  try {
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, null)
+    let tn = walker.nextNode()
+    while (tn) {
+      if (range.intersectsNode(tn)) add(tn)
+      tn = walker.nextNode()
+    }
+  } catch {
+    /* ignore */
+  }
+
+  if (hosts.size === 0) {
+    add(range.startContainer)
+    add(range.endContainer)
+  }
+  return [...hosts]
 }
 
 function scheduleEditorCanvasRefresh(editor) {
@@ -385,72 +434,18 @@ function getForeColorHexFromSelection(doc, win) {
   return rgbStringToHex(win.getComputedStyle(el).color) || ''
 }
 
-function isSpanOnlyFontSize(el) {
-  if (!el || el.tagName !== 'SPAN') return false
-  const st = (el.getAttribute('style') || '').trim()
-  if (!st) return false
-  const parts = st.split(';').map((s) => s.trim()).filter(Boolean)
-  return parts.length > 0 && parts.every((p) => /^font-size\s*:/i.test(p))
-}
-
-/** 선택(또는 캐럿)에 글자 크기(px) 적용 — 중첩 span font-size 가 남아 박스가 안 줄어드는 문제 방지 */
-function applyFontSizePxToSelection(editor, doc, win, px) {
+/** 선택(또는 캐럿)이 속한 텍스트 호스트 요소에 font-size(px) 인라인 스타일 적용 (span 래핑 없음) */
+function applyFontSizePxToSelection(editor, doc, px) {
   const n = Math.max(8, Math.min(200, Math.round(Number(px)) || 16))
-  try {
-    doc.execCommand('styleWithCSS', false, true)
-  } catch {
-    /* ignore */
-  }
   const sel = doc.getSelection()
   if (!sel?.rangeCount) return
   const range = sel.getRangeAt(0)
-  let notifyEl = null
-
-  if (range.collapsed) {
-    const tn = range.startContainer
-    if (tn.nodeType === 3) {
-      const chain = []
-      let p = tn.parentElement
-      while (p && p.tagName === 'SPAN' && isSpanOnlyFontSize(p)) {
-        chain.push(p)
-        p = p.parentElement
-      }
-      if (chain.length > 0) {
-        chain.forEach((sp) => {
-          sp.style.fontSize = `${n}px`
-        })
-        notifyGrapesInputFromDomNode(editor, chain[0])
-        scheduleEditorCanvasRefresh(editor)
-        return
-      }
-    }
-    const span = doc.createElement('span')
-    span.style.fontSize = `${n}px`
-    const z = doc.createTextNode('\u200b')
-    span.appendChild(z)
-    range.insertNode(span)
-    const nr = doc.createRange()
-    nr.setStart(z, 1)
-    nr.collapse(true)
-    sel.removeAllRanges()
-    sel.addRange(nr)
-    notifyEl = span
-  } else {
-    const span = doc.createElement('span')
-    span.style.fontSize = `${n}px`
-    try {
-      const frag = range.extractContents()
-      stripFontSizingFromFragment(frag)
-      span.appendChild(frag)
-      range.insertNode(span)
-      notifyEl = span
-    } catch {
-      const t = sel.toString() || '\u200b'
-      doc.execCommand('insertHTML', false, `<span style="font-size:${n}px">${t}</span>`)
-      notifyEl = sel.anchorNode
-    }
-  }
-  if (notifyEl) notifyGrapesInputFromDomNode(editor, notifyEl)
+  const hosts = collectRteFontSizeHostElements(doc, range)
+  if (!hosts.length) return
+  hosts.forEach((el) => {
+    el.style.fontSize = `${n}px`
+  })
+  notifyGrapesInputFromDomNode(editor, hosts[0])
   scheduleEditorCanvasRefresh(editor)
 }
 
@@ -585,7 +580,7 @@ function mountRteFormatExtras(editor, savedRangeRef) {
       const cur = Math.max(8, Math.min(200, Number(inp?.value) || 16))
       const next = cur - 1
       if (inp) inp.value = String(next)
-      runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
+      runInCanvas((doc) => applyFontSizePxToSelection(editor, doc, next))
     }
     if (t?.getAttribute?.('data-rte-act') === 'fs-plus') {
       e.preventDefault()
@@ -593,7 +588,7 @@ function mountRteFormatExtras(editor, savedRangeRef) {
       const cur = Math.max(8, Math.min(200, Number(inp?.value) || 16))
       const next = cur + 1
       if (inp) inp.value = String(next)
-      runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
+      runInCanvas((doc) => applyFontSizePxToSelection(editor, doc, next))
     }
   })
 
@@ -601,7 +596,7 @@ function mountRteFormatExtras(editor, savedRangeRef) {
   fsInput?.addEventListener('change', () => {
     const next = Math.max(8, Math.min(200, Number(fsInput.value) || 16))
     fsInput.value = String(next)
-    runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
+    runInCanvas((doc) => applyFontSizePxToSelection(editor, doc, next))
   })
   fsInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') fsInput.dispatchEvent(new Event('change', { bubbles: true }))
