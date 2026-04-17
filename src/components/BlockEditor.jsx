@@ -348,7 +348,7 @@ function getFontSizePxFromSelection(doc, win) {
   return Number.isFinite(fs) ? Math.round(fs) : 16
 }
 
-/** RTE 글자 크기를 span 래핑 대신 부여할 블록(또는 인라인 대체) 호스트 */
+/** 캐럿 상태에서 글자 크기를 적용할 블록(또는 인라인 대체) 호스트 */
 const RTE_FS_BLOCK_TAGS = new Set([
   'p',
   'h1',
@@ -378,42 +378,18 @@ function findRteFontSizeHostElement(node) {
   return inlineCandidate
 }
 
-function collectRteFontSizeHostElements(doc, range) {
-  const hosts = new Set()
-  const add = (n) => {
-    const h = findRteFontSizeHostElement(n)
-    if (h) hosts.add(h)
-  }
-
-  if (range.collapsed) {
-    add(range.startContainer)
-    return [...hosts]
-  }
-
-  const ca = range.commonAncestorContainer
-  const root = ca.nodeType === 1 ? ca : ca.parentElement
-  if (!root) {
-    add(range.startContainer)
-    add(range.endContainer)
-    return [...hosts]
-  }
-
-  try {
-    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, null)
-    let tn = walker.nextNode()
-    while (tn) {
-      if (range.intersectsNode(tn)) add(tn)
-      tn = walker.nextNode()
+function stripFontSizingFromFragment(fragment) {
+  const visit = (node) => {
+    if (node.nodeType === 1) {
+      const el = node
+      if (el.tagName === 'FONT') el.removeAttribute('size')
+      el.style?.removeProperty?.('font-size')
+      const st = el.getAttribute('style')
+      if (st !== null && !String(st).trim()) el.removeAttribute('style')
     }
-  } catch {
-    /* ignore */
+    ;[...(node.childNodes || [])].forEach(visit)
   }
-
-  if (hosts.size === 0) {
-    add(range.startContainer)
-    add(range.endContainer)
-  }
-  return [...hosts]
+  ;[...(fragment?.childNodes || [])].forEach(visit)
 }
 
 function scheduleEditorCanvasRefresh(editor) {
@@ -434,18 +410,42 @@ function getForeColorHexFromSelection(doc, win) {
   return rgbStringToHex(win.getComputedStyle(el).color) || ''
 }
 
-/** 선택(또는 캐럿)이 속한 텍스트 호스트 요소에 font-size(px) 인라인 스타일 적용 (span 래핑 없음) */
+/** 선택 구간은 span 래핑, 캐럿 상태는 호스트 요소 스타일에 font-size(px) 적용 */
 function applyFontSizePxToSelection(editor, doc, px) {
   const n = Math.max(8, Math.min(200, Math.round(Number(px)) || 16))
   const sel = doc.getSelection()
   if (!sel?.rangeCount) return
   const range = sel.getRangeAt(0)
-  const hosts = collectRteFontSizeHostElements(doc, range)
-  if (!hosts.length) return
-  hosts.forEach((el) => {
-    el.style.fontSize = `${n}px`
-  })
-  notifyGrapesInputFromDomNode(editor, hosts[0])
+
+  if (!range.collapsed) {
+    const span = doc.createElement('span')
+    span.style.fontSize = `${n}px`
+    let notifyEl = null
+    try {
+      const frag = range.extractContents()
+      stripFontSizingFromFragment(frag)
+      span.appendChild(frag)
+      range.insertNode(span)
+      notifyEl = span
+    } catch {
+      try {
+        range.surroundContents(span)
+        notifyEl = span
+      } catch {
+        /* ignore */
+      }
+    }
+    if (notifyEl) {
+      notifyGrapesInputFromDomNode(editor, notifyEl)
+      scheduleEditorCanvasRefresh(editor)
+    }
+    return
+  }
+
+  const host = findRteFontSizeHostElement(range.startContainer)
+  if (!host) return
+  host.style.fontSize = `${n}px`
+  notifyGrapesInputFromDomNode(editor, host)
   scheduleEditorCanvasRefresh(editor)
 }
 
