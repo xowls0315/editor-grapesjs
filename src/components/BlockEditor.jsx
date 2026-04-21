@@ -348,48 +348,23 @@ function getFontSizePxFromSelection(doc, win) {
   return Number.isFinite(fs) ? Math.round(fs) : 16
 }
 
-/** 캐럿 상태에서 글자 크기를 적용할 블록(또는 인라인 대체) 호스트 */
-const RTE_FS_BLOCK_TAGS = new Set([
-  'p',
-  'h1',
-  'h2',
-  'h3',
-  'h4',
-  'h5',
-  'h6',
-  'li',
-  'td',
-  'th',
-  'blockquote',
-  'figcaption',
-  'div',
-])
-
-function findRteFontSizeHostElement(node) {
-  let el = node?.nodeType === 3 ? node.parentElement : node
-  let inlineCandidate = null
-  while (el && el.nodeType === 1) {
-    const tag = el.tagName.toLowerCase()
-    if (tag === 'body' || tag === 'html') break
-    if (RTE_FS_BLOCK_TAGS.has(tag)) return el
-    if (TOOLBAR_TEXT_TAGS.has(tag)) inlineCandidate = inlineCandidate || el
-    el = el.parentElement
-  }
-  return inlineCandidate
-}
-
+/** 선택 영역 안의 인라인 font-size / FONT size 를 제거해 한 겹 래핑으로 통일할 때 사용 */
 function stripFontSizingFromFragment(fragment) {
   const visit = (node) => {
     if (node.nodeType === 1) {
       const el = node
-      if (el.tagName === 'FONT') el.removeAttribute('size')
+      if (el.tagName === 'FONT') {
+        el.removeAttribute('size')
+      }
       el.style?.removeProperty?.('font-size')
       const st = el.getAttribute('style')
-      if (st !== null && !String(st).trim()) el.removeAttribute('style')
+      if (st !== null && (!String(st).trim())) el.removeAttribute('style')
     }
-    ;[...(node.childNodes || [])].forEach(visit)
+    const kids = node.childNodes ? [...node.childNodes] : []
+    kids.forEach(visit)
   }
-  ;[...(fragment?.childNodes || [])].forEach(visit)
+  if (!fragment) return
+  ;[...fragment.childNodes].forEach(visit)
 }
 
 function scheduleEditorCanvasRefresh(editor) {
@@ -410,42 +385,186 @@ function getForeColorHexFromSelection(doc, win) {
   return rgbStringToHex(win.getComputedStyle(el).color) || ''
 }
 
-/** 선택 구간은 span 래핑, 캐럿 상태는 호스트 요소 스타일에 font-size(px) 적용 */
-function applyFontSizePxToSelection(editor, doc, px) {
-  const n = Math.max(8, Math.min(200, Math.round(Number(px)) || 16))
+function isStyledSpan(el) {
+  if (!el || el.tagName !== 'SPAN') return false
+  return Boolean((el.getAttribute('style') || '').trim())
+}
+
+function nearestFontSizeSpan(node) {
+  let el = node?.nodeType === 3 ? node.parentElement : node
+  while (el && el.nodeType === 1) {
+    if (isStyledSpan(el)) return el
+    el = el.parentElement
+  }
+  return null
+}
+
+function nearestSpan(node) {
+  let el = node?.nodeType === 3 ? node.parentElement : node
+  while (el && el.nodeType === 1) {
+    if (el.tagName === 'SPAN') return el
+    el = el.parentElement
+  }
+  return null
+}
+
+function cleanupSpanStyle(el) {
+  const st = (el?.getAttribute?.('style') || '').trim()
+  if (!st) el?.removeAttribute?.('style')
+}
+
+function toggleInlineTextStyle(editor, doc, win, kind) {
   const sel = doc.getSelection()
   if (!sel?.rangeCount) return
   const range = sel.getRangeAt(0)
+  let notifyEl = null
 
-  if (!range.collapsed) {
+  const applyToStyle = (style, sampleEl) => {
+    const cs = sampleEl ? win.getComputedStyle(sampleEl) : null
+    if (kind === 'bold') {
+      const w = cs?.fontWeight || ''
+      const isBold = w === 'bold' || Number(w) >= 600
+      style.fontWeight = isBold ? 'normal' : '700'
+    } else if (kind === 'italic') {
+      const isItalic = (cs?.fontStyle || '').includes('italic')
+      style.fontStyle = isItalic ? 'normal' : 'italic'
+    } else if (kind === 'underline' || kind === 'strike') {
+      const rawDeco = `${style.textDecorationLine || ''} ${style.textDecoration || ''} ${cs?.textDecorationLine || ''} ${cs?.textDecoration || ''}`.toLowerCase()
+      const set = new Set()
+      if (rawDeco.includes('underline')) set.add('underline')
+      if (rawDeco.includes('line-through')) set.add('line-through')
+      const token = kind === 'underline' ? 'underline' : 'line-through'
+      if (set.has(token)) set.delete(token)
+      else set.add(token)
+      if (set.size === 0) {
+        style.removeProperty('text-decoration')
+        style.removeProperty('text-decoration-line')
+      } else {
+        const line = Array.from(set).join(' ')
+        style.setProperty('text-decoration', line)
+        style.setProperty('text-decoration-line', line)
+      }
+    }
+  }
+
+  if (range.collapsed) {
+    const baseNode = range.startContainer?.nodeType === 3 ? range.startContainer.parentElement : range.startContainer
+    const span = nearestSpan(range.startContainer) || doc.createElement('span')
+    if (!span.parentNode) {
+      const z = doc.createTextNode('\u200b')
+      span.appendChild(z)
+      range.insertNode(span)
+      const nr = doc.createRange()
+      nr.setStart(z, 1)
+      nr.collapse(true)
+      sel.removeAllRanges()
+      sel.addRange(nr)
+    }
+    applyToStyle(span.style, baseNode || span)
+    cleanupSpanStyle(span)
+    notifyEl = span
+  } else {
+    const startSpan = nearestSpan(range.startContainer)
+    const endSpan = nearestSpan(range.endContainer)
+    if (startSpan && startSpan === endSpan) {
+      applyToStyle(startSpan.style, startSpan)
+      cleanupSpanStyle(startSpan)
+      notifyEl = startSpan
+    } else {
+      const span = doc.createElement('span')
+      const sample = range.startContainer?.nodeType === 3 ? range.startContainer.parentElement : range.startContainer
+      applyToStyle(span.style, sample || span)
+      try {
+        const frag = range.extractContents()
+        span.appendChild(frag)
+        range.insertNode(span)
+        const nr = doc.createRange()
+        nr.selectNodeContents(span)
+        sel.removeAllRanges()
+        sel.addRange(nr)
+        cleanupSpanStyle(span)
+        notifyEl = span
+      } catch {
+        return
+      }
+    }
+  }
+
+  if (notifyEl) notifyGrapesInputFromDomNode(editor, notifyEl)
+  scheduleEditorCanvasRefresh(editor)
+}
+
+/** 선택(또는 캐럿)에 글자 크기(px) 적용 — 중첩 span font-size 가 남아 박스가 안 줄어드는 문제 방지 */
+function applyFontSizePxToSelection(editor, doc, win, px) {
+  const n = Math.max(8, Math.min(200, Math.round(Number(px)) || 16))
+  try {
+    doc.execCommand('styleWithCSS', false, true)
+  } catch {
+    /* ignore */
+  }
+  const sel = doc.getSelection()
+  if (!sel?.rangeCount) return
+  const range = sel.getRangeAt(0)
+  let notifyEl = null
+
+  if (range.collapsed) {
+    const tn = range.startContainer
+    if (tn.nodeType === 3) {
+      const chain = []
+      let p = tn.parentElement
+      while (p && p.tagName === 'SPAN' && isStyledSpan(p)) {
+        chain.push(p)
+        p = p.parentElement
+      }
+      if (chain.length > 0) {
+        chain.forEach((sp) => {
+          sp.style.fontSize = `${n}px`
+        })
+        notifyGrapesInputFromDomNode(editor, chain[0])
+        scheduleEditorCanvasRefresh(editor)
+        return
+      }
+    }
     const span = doc.createElement('span')
     span.style.fontSize = `${n}px`
-    let notifyEl = null
+    const z = doc.createTextNode('\u200b')
+    span.appendChild(z)
+    range.insertNode(span)
+    const nr = doc.createRange()
+    nr.setStart(z, 1)
+    nr.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(nr)
+    notifyEl = span
+  } else {
+    const startSpan = nearestFontSizeSpan(range.startContainer)
+    const endSpan = nearestFontSizeSpan(range.endContainer)
+    if (startSpan && startSpan === endSpan) {
+      startSpan.style.fontSize = `${n}px`
+      notifyGrapesInputFromDomNode(editor, startSpan)
+      scheduleEditorCanvasRefresh(editor)
+      return
+    }
+    const span = doc.createElement('span')
+    span.style.fontSize = `${n}px`
     try {
       const frag = range.extractContents()
       stripFontSizingFromFragment(frag)
       span.appendChild(frag)
       range.insertNode(span)
+      // 같은 텍스트를 연속 조절할 때 다음 액션도 이 span 범위를 기준으로 동작하도록 유지
+      const nr = doc.createRange()
+      nr.selectNodeContents(span)
+      sel.removeAllRanges()
+      sel.addRange(nr)
       notifyEl = span
     } catch {
-      try {
-        range.surroundContents(span)
-        notifyEl = span
-      } catch {
-        /* ignore */
-      }
+      const t = sel.toString() || '\u200b'
+      doc.execCommand('insertHTML', false, `<span style="font-size:${n}px">${t}</span>`)
+      notifyEl = sel.anchorNode
     }
-    if (notifyEl) {
-      notifyGrapesInputFromDomNode(editor, notifyEl)
-      scheduleEditorCanvasRefresh(editor)
-    }
-    return
   }
-
-  const host = findRteFontSizeHostElement(range.startContainer)
-  if (!host) return
-  host.style.fontSize = `${n}px`
-  notifyGrapesInputFromDomNode(editor, host)
+  if (notifyEl) notifyGrapesInputFromDomNode(editor, notifyEl)
   scheduleEditorCanvasRefresh(editor)
 }
 
@@ -567,6 +686,9 @@ function mountRteFormatExtras(editor, savedRangeRef) {
       const doc = editor.Canvas.getDocument()
       const win = editor.Canvas.getWindow()
       fn(doc, win)
+      // 다음 툴바 액션에서 이전 범위를 재복원하지 않도록, 적용 후 현재 selection을 다시 저장
+      saveIframeSelection(editor, savedRangeRef, { allowCollapsed: true })
+      syncRteExtrasInputsFromCanvas(editor)
     })
   }
 
@@ -580,7 +702,7 @@ function mountRteFormatExtras(editor, savedRangeRef) {
       const cur = Math.max(8, Math.min(200, Number(inp?.value) || 16))
       const next = cur - 1
       if (inp) inp.value = String(next)
-      runInCanvas((doc) => applyFontSizePxToSelection(editor, doc, next))
+      runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
     }
     if (t?.getAttribute?.('data-rte-act') === 'fs-plus') {
       e.preventDefault()
@@ -588,7 +710,7 @@ function mountRteFormatExtras(editor, savedRangeRef) {
       const cur = Math.max(8, Math.min(200, Number(inp?.value) || 16))
       const next = cur + 1
       if (inp) inp.value = String(next)
-      runInCanvas((doc) => applyFontSizePxToSelection(editor, doc, next))
+      runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
     }
   })
 
@@ -596,7 +718,7 @@ function mountRteFormatExtras(editor, savedRangeRef) {
   fsInput?.addEventListener('change', () => {
     const next = Math.max(8, Math.min(200, Number(fsInput.value) || 16))
     fsInput.value = String(next)
-    runInCanvas((doc) => applyFontSizePxToSelection(editor, doc, next))
+    runInCanvas((doc, win) => applyFontSizePxToSelection(editor, doc, win, next))
   })
   fsInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') fsInput.dispatchEvent(new Event('change', { bubbles: true }))
@@ -773,6 +895,29 @@ function getCanvasDomHtmlSnapshot(editor) {
     const body = doc?.body
     if (!body) return ''
     const clone = body.cloneNode(true)
+
+    // Grapes 캔버스 내부 CSS 룰(#id { ... })을 해당 요소 인라인 style로 흡수
+    // 코드 모달에서 .gjs-css-rules 컨테이너가 그대로 보이지 않도록 정리한다.
+    const cssRuleHost = clone.querySelector('#gjs-css-rules') || clone.querySelector('.gjs-css-rules')
+    const cssText = Array.from(cssRuleHost?.querySelectorAll?.('style') || [])
+      .map((el) => el.textContent || '')
+      .join('\n')
+    const idRuleRe = /#([A-Za-z_][\w-]*)\s*\{([^}]*)\}/g
+    let m
+    while ((m = idRuleRe.exec(cssText)) !== null) {
+      const id = m[1]
+      const decl = String(m[2] || '').trim()
+      if (!id || !decl) continue
+      const target = clone.querySelector(`#${id}`)
+      if (!target) continue
+      const prev = (target.getAttribute('style') || '').trim()
+      const next = prev ? `${prev.replace(/;?\s*$/, ';')} ${decl}` : decl
+      target.setAttribute('style', next.trim())
+    }
+
+    // Grapes 런타임 보조 컨테이너 제거
+    clone.querySelectorAll('.gjs-css-rules, #gjs-css-rules, .gjs-js-cont').forEach((el) => el.remove())
+
     clone.querySelectorAll('*').forEach((el) => {
       Array.from(el.attributes || []).forEach((attr) => {
         const name = String(attr.name || '')
@@ -1293,10 +1438,50 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       },
       richTextEditor: {
         actions: [
-          'bold',
-          'italic',
-          'underline',
-          'strikethrough',
+          {
+            name: 'bold',
+            icon: '<b>B</b>',
+            attributes: { title: 'Bold' },
+            event: 'mousedown',
+            result() {
+              execOnIframeSelection(editor, savedRangeRef, () => {
+                toggleInlineTextStyle(editor, editor.Canvas.getDocument(), editor.Canvas.getWindow(), 'bold')
+              })
+            },
+          },
+          {
+            name: 'italic',
+            icon: '<i>I</i>',
+            attributes: { title: 'Italic' },
+            event: 'mousedown',
+            result() {
+              execOnIframeSelection(editor, savedRangeRef, () => {
+                toggleInlineTextStyle(editor, editor.Canvas.getDocument(), editor.Canvas.getWindow(), 'italic')
+              })
+            },
+          },
+          {
+            name: 'underline',
+            icon: '<u>U</u>',
+            attributes: { title: 'Underline' },
+            event: 'mousedown',
+            result() {
+              execOnIframeSelection(editor, savedRangeRef, () => {
+                toggleInlineTextStyle(editor, editor.Canvas.getDocument(), editor.Canvas.getWindow(), 'underline')
+              })
+            },
+          },
+          {
+            name: 'strikethrough',
+            icon: '<s>S</s>',
+            attributes: { title: 'Strike-through' },
+            event: 'mousedown',
+            result() {
+              execOnIframeSelection(editor, savedRangeRef, () => {
+                toggleInlineTextStyle(editor, editor.Canvas.getDocument(), editor.Canvas.getWindow(), 'strike')
+              })
+            },
+          },
           {
             name: 'link',
             event: 'mousedown',
@@ -1541,21 +1726,21 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
         if (k === 'b' && shouldHandleShortcut(e, anyModalOpenRef.current, shell)) {
           e.preventDefault()
           execOnIframeSelection(ed, savedRangeRef, () => {
-            ed.Canvas.getDocument().execCommand('bold', false)
+            toggleInlineTextStyle(ed, ed.Canvas.getDocument(), ed.Canvas.getWindow(), 'bold')
           })
           return
         }
         if (k === 'i') {
           e.preventDefault()
           execOnIframeSelection(ed, savedRangeRef, () => {
-            ed.Canvas.getDocument().execCommand('italic', false)
+            toggleInlineTextStyle(ed, ed.Canvas.getDocument(), ed.Canvas.getWindow(), 'italic')
           })
           return
         }
         if (k === 'u') {
           e.preventDefault()
           execOnIframeSelection(ed, savedRangeRef, () => {
-            ed.Canvas.getDocument().execCommand('underline', false)
+            toggleInlineTextStyle(ed, ed.Canvas.getDocument(), ed.Canvas.getWindow(), 'underline')
           })
           return
         }
