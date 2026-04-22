@@ -127,6 +127,14 @@ const COMPONENT_LINK_TOOLBAR_ITEM = {
   attributes: { title: '링크 설정' },
 }
 
+const IMAGE_REPLACE_TOOLBAR_ITEM = {
+  id: 'img-replace',
+  label:
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10.2l-2-1.8-3.9 4.3-2.6-2.3L6 21H6a2 2 0 0 1-2-2V5zm4 2.5a2.3 2.3 0 1 0 0 4.6 2.3 2.3 0 0 0 0-4.6zM14 21l4-4 2 2v2h-6z"/></svg>',
+  command: 'custom:image-replace',
+  attributes: { title: '이미지 교체' },
+}
+
 function withComponentLinkToolbar(toolbar) {
   const base = Array.isArray(toolbar) ? [...toolbar] : []
   const exists = base.some((it) => it?.id === COMPONENT_LINK_TOOLBAR_ITEM.id || it?.command === COMPONENT_LINK_TOOLBAR_ITEM.command)
@@ -140,6 +148,19 @@ function withComponentLinkToolbar(toolbar) {
   return base
 }
 
+function withImageReplaceToolbar(toolbar) {
+  const base = Array.isArray(toolbar) ? [...toolbar] : []
+  const exists = base.some((it) => it?.id === IMAGE_REPLACE_TOOLBAR_ITEM.id || it?.command === IMAGE_REPLACE_TOOLBAR_ITEM.command)
+  if (exists) return base
+  const delIdx = base.findIndex((it) => it?.command === 'core:component-delete')
+  if (delIdx >= 0) {
+    base.splice(delIdx, 0, { ...IMAGE_REPLACE_TOOLBAR_ITEM })
+  } else {
+    base.push({ ...IMAGE_REPLACE_TOOLBAR_ITEM })
+  }
+  return base
+}
+
 function markEditableTree(component) {
   const nextToolbar = withComponentLinkToolbar(component.get?.('toolbar'))
   const tag = (component.get('tagName') || '').toLowerCase()
@@ -149,7 +170,7 @@ function markEditableTree(component) {
         editable: false,
         draggable: true,
         resizable: { ...IMAGE_RESIZE_HANDLES },
-        toolbar: nextToolbar,
+        toolbar: withImageReplaceToolbar(nextToolbar),
       })
     }
     return
@@ -1097,7 +1118,6 @@ function shouldHandleShortcut(e, modalOpen, shellEl) {
   if (t.closest?.('.be-modal-overlay')) return false
   if (!shellEl) return false
   if (t.closest?.('.be-toolbar')) return true
-  if (t.closest?.('.be-img-toolbar')) return true
   if (t.closest?.('.gjs-editor') || t.closest?.('.gjs-cv-canvas')) return true
   const ae = document.activeElement
   if (ae?.tagName === 'IFRAME' && shellEl.contains(ae)) return true
@@ -1223,7 +1243,7 @@ function normalizeImageLinkPair(anchorComponent, imageComponent) {
       draggable: true,
       resizable: { ...IMAGE_RESIZE_HANDLES },
       editable: false,
-      toolbar: withComponentLinkToolbar(imageComponent.get?.('toolbar')),
+      toolbar: withImageReplaceToolbar(withComponentLinkToolbar(imageComponent.get?.('toolbar'))),
     })
   } catch {
     /* ignore */
@@ -1286,6 +1306,41 @@ function applyImageSrcToComponent(editor, component, srcRaw) {
   } catch {
     /* ignore */
   }
+}
+
+function fitImageWidthToParent(editor, component) {
+  if (!editor || !isImgComponent(component)) return
+  const currentStyle = component.getStyle?.() || {}
+  // 이미 폭 정책이 있는 이미지는 보정하지 않음(템플릿/수동 삽입 보존)
+  if (currentStyle.width || currentStyle['max-width']) return
+
+  const apply = () => {
+    const imageEl = component.getEl?.()
+    const parentEl = component.parent?.()?.getEl?.()
+    if (!imageEl || !parentEl?.getBoundingClientRect) return false
+    const width = Math.round(parentEl.getBoundingClientRect().width || 0)
+    if (!width) return false
+
+    component.setStyle?.({
+      ...currentStyle,
+      width: `${width}px`,
+      'max-width': '100%',
+      height: 'auto',
+    })
+
+    const attrs = component.getAttributes?.() || {}
+    const { width: _w, height: _h, ...rest } = attrs
+    component.addAttributes?.(rest)
+    notifyGrapesInputFromDomNode(editor, imageEl)
+    return true
+  }
+
+  if (apply()) return
+  ;[30, 120, 260].forEach((ms) => {
+    setTimeout(() => {
+      apply()
+    }, ms)
+  })
 }
 
 function applyLinkToComponent(editor, component, hrefRaw) {
@@ -1370,7 +1425,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const anyModalOpenRef = useRef(false)
   anyModalOpenRef.current = anyModalOpen
 
-  const [imgToolbar, setImgToolbar] = useState(initialImgToolbarState)
+  const [, setImgToolbar] = useState(initialImgToolbarState)
 
   /* 링크 모달은 RTE 툴바 mousedown 캡처에서 이미 selection 저장됨 (툴바가 iframe 밖이라 click 시점엔 선택이 사라짐) */
   openRteLinkModalRef.current = () => {
@@ -1387,6 +1442,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   useEffect(() => {
     if (!containerRef.current) return undefined
 
+    let editorLoaded = false
     let imgToolbarRaf = null
     const scheduleImgToolbar = (maybeCmp) => {
       if (imgToolbarRaf != null) cancelAnimationFrame(imgToolbarRaf)
@@ -1559,12 +1615,23 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
         const attrs = anchor?.getAttributes?.() || target.getAttributes?.() || {}
         const imgLink = getImageLinkData(target)
         componentLinkTargetRef.current = target
-        setImgToolbar(initialImgToolbarState)
         setModalLink({
           open: true,
           url: String(attrs.href || imgLink.href || ''),
           mode: 'component',
         })
+      },
+    })
+
+    editor.Commands.add('custom:image-replace', {
+      run(ed) {
+        const sel = ed.getSelected()
+        const target = getFirstImageChild(sel) || sel
+        if (!isImgComponent(target)) return
+        imageReplaceTargetRef.current = target
+        const attrs = target.getAttributes?.() || {}
+        const cur = attrs.src || ''
+        setModalImage({ open: true, url: cur, mode: 'replace' })
       },
     })
 
@@ -1611,6 +1678,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     let removeImgScrollListener = null
 
     editor.on('load', () => {
+      editorLoaded = true
       injectCanvasHeadAssets(editor, headAssetsRef.current)
       configureWrapper(editor)
       markEditableTree(editor.getWrapper())
@@ -1665,8 +1733,11 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
           return
         }
         if (cmp?.set) {
+          const nextToolbar = isImgComponent(cmp)
+            ? withImageReplaceToolbar(withComponentLinkToolbar(cmp.get?.('toolbar')))
+            : withComponentLinkToolbar(cmp.get?.('toolbar'))
           cmp.set({
-            toolbar: withComponentLinkToolbar(cmp.get?.('toolbar')),
+            toolbar: nextToolbar,
           })
         }
         refreshToolStyleFromSelection()
@@ -1679,6 +1750,10 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     editor.on('component:update', (cmp) => {
       const ed = editorRef.current
       if (ed && cmp === ed.getSelected?.()) scheduleImgToolbar(cmp)
+    })
+    editor.on('component:add', (cmp) => {
+      if (!editorLoaded || !isImgComponent(cmp)) return
+      fitImageWidthToParent(editor, cmp)
     })
     editor.on('component:drag:end', (payload) => {
       const ed = editorRef.current
@@ -2066,8 +2141,6 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
           </button>
         </div>
 
-        <div className="be-spacer" />
-
         <button type="button" className="be-save" onClick={handleSave}>
           <svg className="be-toolbar-svg be-toolbar-svg--save" width={18} height={18} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden>
             <g fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
@@ -2084,40 +2157,6 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       <div className="be-canvas-wrap">
         <div ref={containerRef} className="be-gjs-mount" />
       </div>
-
-      {imgToolbar.visible && (
-        <div
-          role="toolbar"
-          aria-label="이미지 도구"
-          className="be-img-toolbar gjs-rte-toolbar"
-          style={{
-            position: 'absolute',
-            top: imgToolbar.top,
-            left: imgToolbar.left,
-            transform: 'translate(-50%, 0)',
-            zIndex: 30,
-          }}
-          onMouseDown={(e) => e.preventDefault()}
-        >
-          <button
-            type="button"
-            className="be-img-toolbar__btn"
-            title="다른 이미지로 교체"
-            onClick={() => {
-              const ed = editorRef.current
-              const cmp = ed?.getSelected?.()
-              if (!isImgComponent(cmp)) return
-              imageReplaceTargetRef.current = cmp
-              const attrs = cmp.getAttributes?.() || {}
-              const cur = attrs.src || ''
-              setImgToolbar(initialImgToolbarState)
-              setModalImage({ open: true, url: cur, mode: 'replace' })
-            }}
-          >
-            이미지 교체
-          </button>
-        </div>
-      )}
 
       {modalLink.open && (
         <div className="be-modal-overlay" role="dialog">
@@ -2238,7 +2277,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                   } else {
                     insertHtmlIntoBlock(
                       ed,
-                      `<img src="${src.replace(/"/g, '&quot;')}" alt="" style="max-width:100%;height:auto;border-radius:12px;"/>`,
+                      `<img src="${src.replace(/"/g, '&quot;')}" alt="" style="max-width:100%;height:auto;"/>`,
                     )
                   }
                   setModalImage({ open: false, url: '', mode: 'insert' })
