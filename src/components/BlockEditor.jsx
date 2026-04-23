@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import grapesjs from 'grapesjs'
+import postcss from 'postcss'
 import 'grapesjs/dist/css/grapes.min.css'
 import './BlockEditor.css'
 const TOOLBAR_TEXT_TAGS = new Set([
@@ -42,6 +43,183 @@ function getBlockRootComponent(editor) {
     w.find('section')[0] ||
     w.components().at(0)
   )
+}
+
+/** @param {string} id */
+function escapeCssIdForQuerySelector(id) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(id)
+  }
+  return String(id || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\s/g, '\\20 ')
+}
+
+/**
+ * `ancestor`에서 `el`로 내려가는 자식 인덱스 경로(첫 루트 = ancestor, 없으면 null)
+ */
+function getChildIndexPathFromAncestor(el, ancestor) {
+  const path = []
+  let n = el
+  while (n && n !== ancestor) {
+    const p = n.parentNode
+    if (!p) return null
+    const idx = Array.prototype.indexOf.call(p.children, n)
+    if (idx < 0) return null
+    path.unshift(idx)
+    n = p
+  }
+  return n === ancestor ? path : null
+}
+
+function getElementByPath(root, path) {
+  if (!root || !path) return null
+  let cur = root
+  for (let i = 0; i < path.length; i += 1) {
+    const next = cur.children && cur.children[path[i]]
+    if (!next) return null
+    cur = next
+  }
+  return cur
+}
+
+function isLikelyGrapesAutoId(id) {
+  return /^i[a-z0-9-]+$/i.test(String(id || '').trim())
+}
+
+function hasMeaningfulText(value) {
+  return String(value || '')
+    .replace(/\u00a0/g, ' ')
+    .trim().length > 0
+}
+
+/**
+ * setComponents('') 이후 GrapesJS가 자동 생성하는 빈 placeholder div인지 판별
+ * 예: <div id="ie89"></div>
+ */
+function isAutoEmptyPlaceholderElement(el) {
+  if (!el || String(el.tagName || '').toLowerCase() !== 'div') return false
+  if ((el.children?.length || 0) > 0) return false
+  if (hasMeaningfulText(el.textContent)) return false
+  const attrs = Array.from(el.attributes || [])
+  if (!attrs.length) return true
+  if (attrs.length === 1 && attrs[0].name === 'id' && isLikelyGrapesAutoId(attrs[0].value)) return true
+  return false
+}
+
+function isAutoEmptyPlaceholderComponent(comp) {
+  if (!comp || typeof comp.get !== 'function') return false
+  const tag = String(comp.get('tagName') || 'div').toLowerCase()
+  if (tag !== 'div') return false
+  const children = comp.components?.()
+  if (children?.length) return false
+  if (hasMeaningfulText(comp.get('content'))) return false
+  const attrs = comp.getAttributes?.() || {}
+  const attrKeys = Object.keys(attrs)
+  const style = comp.getStyle?.() || {}
+  if (Object.keys(style).length > 0) return false
+  const classes = comp.getClasses?.()
+  const classCount = Array.isArray(classes) ? classes.length : typeof classes?.length === 'number' ? classes.length : 0
+  if (classCount > 0) return false
+  if (!attrKeys.length) return true
+  if (attrKeys.length === 1 && attrKeys[0] === 'id' && isLikelyGrapesAutoId(attrs.id)) return true
+  return false
+}
+
+function stripSingleAutoEmptyPlaceholderHtml(html) {
+  const src = String(html || '').trim()
+  if (!src) return ''
+  const matched = src.match(/^<div\b([^>]*)><\/div>$/i)
+  if (!matched) return src
+  const attrsChunk = String(matched[1] || '')
+  const idMatch = attrsChunk.match(/\bid\s*=\s*["']([^"']+)["']/i)
+  if (!idMatch) return src
+  // id 외 다른 속성이 있으면 사용자 의도로 간주하고 유지
+  const withoutId = attrsChunk.replace(/\bid\s*=\s*["'][^"']+["']/i, '').replace(/\s+/g, '').trim()
+  if (withoutId) return src
+  return isLikelyGrapesAutoId(idMatch[1]) ? '' : src
+}
+
+/**
+ * 캔버스와 동일한 구조의 `body` clone(`bodyClone`)에서, iframe 내 `liveEl`에 대응하는 노드 찾기
+ * (id 일치 → 실패 시 liveBody 기준 child-index 경로)
+ */
+function findInBodyCloneByLiveElement(liveBody, liveEl, bodyClone) {
+  if (!liveEl || !bodyClone || !liveBody) return null
+  if (liveEl === liveBody) return bodyClone
+  const iid = liveEl.id && String(liveEl.id).trim()
+  if (iid) {
+    try {
+      const byId = bodyClone.querySelector(`#${escapeCssIdForQuerySelector(iid)}`)
+      if (byId) return byId
+    } catch {
+      /* ignore */
+    }
+  }
+  const path = getChildIndexPathFromAncestor(liveEl, liveBody)
+  return path && path.length ? getElementByPath(bodyClone, path) : null
+}
+
+/**
+ * 래퍼(그래페 루트) 바로 아래 1뎁스의 최상위 컴포넌트들(실제 "블록" 콘텐츠)만 HTML로 잇는다.
+ * 살롱/스튜디오 등 특정 id·클래스에 의존하지 않는다.
+ */
+function getTopLevelComponentExportMarkupFromClone(editor, liveBody, bodyClone) {
+  const w = editor.getWrapper()
+  if (!w) return null
+  const wrapEl = w.getEl()
+  if (!wrapEl) return null
+  const wrapInClone = findInBodyCloneByLiveElement(liveBody, wrapEl, bodyClone)
+  if (!wrapInClone) return null
+  const parts = []
+  const col = w.components && w.components()
+  if (col && typeof col.forEach === 'function') {
+    col.forEach((comp) => {
+      if (isAutoEmptyPlaceholderComponent(comp)) return
+      if (!comp || typeof comp.getEl !== 'function') return
+      const el = comp.getEl()
+      if (!el) return
+      const node = findInBodyCloneByLiveElement(liveBody, el, bodyClone)
+      if (node && !isAutoEmptyPlaceholderElement(node)) parts.push(node.outerHTML)
+    })
+  } else {
+    for (const el of Array.from(wrapInClone.children)) {
+      if (el && !isAutoEmptyPlaceholderElement(el)) parts.push(el.outerHTML)
+    }
+  }
+  if (parts.length) return parts.join('\n\n')
+  return stripSingleAutoEmptyPlaceholderHtml(wrapInClone.innerHTML)
+}
+
+/**
+ * getHtml()만 쓰는 대체 경로(스냅샷 실패 시). 래퍼 1뎁스만 합침
+ */
+function getTopLevelComponentHtmlFromGetHtml(editor) {
+  try {
+    if (!editor || !editor.getWrapper || !editor.getHtml) return editor?.getHtml?.() || ''
+    const w = editor.getWrapper()
+    if (!w) return editor.getHtml() || ''
+    const col = w.components && w.components()
+    const out = []
+    if (col && typeof col.forEach === 'function') {
+      col.forEach((c) => {
+        try {
+          if (isAutoEmptyPlaceholderComponent(c)) return
+          if (!c) return
+          const h = editor.getHtml({ component: c })
+          const cleaned = stripSingleAutoEmptyPlaceholderHtml(h)
+          if (cleaned) out.push(String(cleaned))
+        } catch {
+          /* ignore */
+        }
+      })
+    }
+    if (out.length) return out.join('\n\n')
+  } catch {
+    /* ignore */
+  }
+  return stripSingleAutoEmptyPlaceholderHtml(editor.getHtml() || '')
 }
 
 const COMPONENT_LINK_ICON_SVG =
@@ -130,7 +308,9 @@ const COMPONENT_LINK_TOOLBAR_ITEM = {
 const IMAGE_REPLACE_TOOLBAR_ITEM = {
   id: 'img-replace',
   label:
-    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10.2l-2-1.8-3.9 4.3-2.6-2.3L6 21H6a2 2 0 0 1-2-2V5zm4 2.5a2.3 2.3 0 1 0 0 4.6 2.3 2.3 0 0 0 0-4.6zM14 21l4-4 2 2v2h-6z"/></svg>',
+    '<svg viewBox="0 0 64 64" width="20" height="20" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">' +
+    '<path fill="currentColor" stroke="currentColor" stroke-width="0.9" stroke-linejoin="round" d="M58,31H26a2.00229,2.00229,0,0,0-2,2V57a2.00229,2.00229,0,0,0,2,2H58a2.00229,2.00229,0,0,0,2-2V33A2.00229,2.00229,0,0,0,58,31ZM45.49286,57l-5.35248-6.95782,4.96021-8.28339L56.74152,57Zm-2.52411,0H27.249L35,46.64014ZM58,33l.00092,22.35352L46.68555,40.53857a1.99991,1.99991,0,0,0-3.29395.19824l-4.56134,7.60236L36.585,45.42041a2.05524,2.05524,0,0,0-3.17871.01074L26,55.33051V33ZM35,41a3,3,0,1,0-3-3A3.00328,3.00328,0,0,0,35,41Zm0-4a1,1,0,1,1-1,1A1.001,1.001,0,0,1,35,37ZM29,27a.99974.99974,0,0,0,1-1V6a.99974.99974,0,0,0-1-1H5A.99974.99974,0,0,0,4,6V26a.99974.99974,0,0,0,1,1ZM17.79584,25H8.20416L13,19.51855Zm.22839-2.777L21.085,16.86621,26.77905,25H20.45428ZM28,7V23.256l-5.27637-7.53625a1.99934,1.99934,0,0,0-3.375.15381L16.6308,20.63062l-2.12592-2.42944a2.06733,2.06733,0,0,0-3.01074,0L6,24.48071V7ZM14,15a3,3,0,1,0-3-3A3.00328,3.00328,0,0,0,14,15Zm0-4a1,1,0,1,1-1,1A1.001,1.001,0,0,1,14,11Zm7,33H15V37h3a1.00015,1.00015,0,0,0,.78125-1.62451l-4-5a1.03532,1.03532,0,0,0-1.5625,0l-4,5A1.00015,1.00015,0,0,0,10,37h3v8a.99974.99974,0,0,0,1,1h7a1,1,0,0,0,0-2ZM14,32.60059,15.91895,35H12.08105ZM33,17H45v4H42a1.00015,1.00015,0,0,0-.78125,1.62451l4,5a1.00049,1.00049,0,0,0,1.5625,0l4-5A1.00015,1.00015,0,0,0,50,21H47V16a.99974.99974,0,0,0-1-1H33a1,1,0,0,0,0,2Zm13,8.39941L44.08105,23h3.83789Z"/>' +
+    '</svg>',
   command: 'custom:image-replace',
   attributes: { title: '이미지 교체' },
 }
@@ -794,6 +974,160 @@ function isStylesheetLinkTag(tag) {
   return /\brel\s*=\s*(['"]?)stylesheet\1/i.test(String(tag || ''))
 }
 
+const RUNTIME_SELECTOR_PATTERNS = [
+  /\.gjs-[\w-]+/i,
+  /\[data-gjs-[\w-]+(?:=[^\]]+)?\]/i,
+  /\[data-gjs-type\s*=\s*["']wrapper["']\]/i,
+  /#gjs-css-rules/i,
+  /\.gjs-css-rules/i,
+  /\.gjs-js-cont/i,
+  /^\*\s*::?-webkit-scrollbar(?:-track|-thumb)?$/i,
+]
+
+function normalizeCss(css) {
+  return String(css || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function sanitizeLinks(links) {
+  const seen = new Set()
+  return (Array.isArray(links) ? links : [])
+    .map((tag) => String(tag || '').trim())
+    .filter(Boolean)
+    .filter((tag) => isStylesheetLinkTag(tag))
+    .filter((tag) => {
+      const key = tag.replace(/\s+/g, ' ').trim()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+function isRuntimeCssSelector(selector) {
+  const src = String(selector || '').replace(/\s+/g, ' ').trim()
+  if (!src) return false
+  return RUNTIME_SELECTOR_PATTERNS.some((re) => re.test(src))
+}
+
+/** PostCSS Rule에서 개별 selector 목록(쉼표로 분리) */
+function getRuleSelectorStrings(rule) {
+  const direct = Array.isArray(rule?.selectors) ? rule.selectors : []
+  if (direct.length) return direct.map((s) => String(s).trim())
+  return String(rule?.selector || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function isRuntimeBodyRule(rule) {
+  const selectors = getRuleSelectorStrings(rule)
+  if (selectors.length !== 1 || String(selectors[0] || '').trim().toLowerCase() !== 'body') return false
+  const decls = []
+  rule.walkDecls((d) => decls.push([String(d.prop || '').trim().toLowerCase(), String(d.value || '').trim().toLowerCase()]))
+  if (!decls.length) return false
+  return decls.every(([prop, value]) => {
+    if (prop === 'background-color' && (value === '#fff' || value === '#ffffff' || value === 'white')) return true
+    if (prop === 'margin' && value === '0') return true
+    return false
+  })
+}
+
+function isRuntimeUniversalBoxSizingRule(rule) {
+  const selectors = getRuleSelectorStrings(rule)
+  if (selectors.length !== 1 || String(selectors[0] || '').replace(/\s+/g, '').toLowerCase() !== '*') return false
+  const decls = []
+  rule.walkDecls((d) => decls.push([String(d.prop || '').trim().toLowerCase(), String(d.value || '').trim().toLowerCase()]))
+  if (!decls.length) return false
+  return decls.every(([prop, value]) => {
+    const isBoxSizingProp = prop === 'box-sizing' || prop === '-webkit-box-sizing' || prop === '-moz-box-sizing'
+    if (!isBoxSizingProp) return false
+    return value === 'border-box'
+  })
+}
+
+function filterCssByPostcss(css) {
+  const src = normalizeCss(css)
+  if (!src) return ''
+  try {
+    const root = postcss.parse(src)
+    root.walkRules((rule) => {
+      const selectors = getRuleSelectorStrings(rule)
+      if (
+        selectors.some((sel) => isRuntimeCssSelector(sel)) ||
+        isRuntimeBodyRule(rule) ||
+        isRuntimeUniversalBoxSizingRule(rule)
+      ) {
+        rule.remove()
+      }
+    })
+    root.walkAtRules((atRule) => {
+      if (!atRule.nodes || atRule.nodes.length === 0) atRule.remove()
+    })
+    return normalizeCss(root.toString())
+  } catch {
+    return src
+  }
+}
+
+function dedupeCssBlocks(css) {
+  const src = normalizeCss(css)
+  if (!src) return ''
+  try {
+    const root = postcss.parse(src)
+    const seen = new Set()
+    root.each((node) => {
+      const key = normalizeCss(node.toString())
+      if (!key) {
+        node.remove()
+        return
+      }
+      if (seen.has(key)) {
+        node.remove()
+        return
+      }
+      seen.add(key)
+    })
+    return normalizeCss(root.toString())
+  } catch {
+    return src
+  }
+}
+
+function sanitizeCss(css) {
+  return dedupeCssBlocks(filterCssByPostcss(css))
+}
+
+function sanitizeHeadAssets({ links = [], css = '' } = {}) {
+  return {
+    links: sanitizeLinks(links),
+    css: sanitizeCss(css),
+  }
+}
+
+function stripRuntimeStyleTagsFromHtml(html) {
+  const src = String(html || '')
+  if (!src.trim()) return ''
+  if (typeof DOMParser === 'undefined') return src
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    doc.body.querySelectorAll('style').forEach((styleEl) => {
+      const cleaned = sanitizeCss(styleEl.textContent || '')
+      if (!cleaned) {
+        styleEl.remove()
+        return
+      }
+      styleEl.textContent = cleaned
+    })
+    return doc.body.innerHTML
+  } catch {
+    return src
+  }
+}
+
 function splitHeadAssetsAndHtml(codeText) {
   const src = String(codeText || '')
   const linkTags = []
@@ -813,16 +1147,22 @@ function splitHeadAssetsAndHtml(codeText) {
     return ''
   })
 
-  return {
+  const safeAssets = sanitizeHeadAssets({
     links: linkTags,
     css: styles.filter(Boolean).join('\n\n'),
-    html: html.trim(),
+  })
+
+  return {
+    links: safeAssets.links,
+    css: safeAssets.css,
+    html: stripRuntimeStyleTagsFromHtml(html).trim(),
   }
 }
 
 function composeHeadAssetsMarkup({ links = [], css = '' }) {
-  const linkPart = links.filter(Boolean).join('\n')
-  const stylePart = css.trim() ? `<style>\n${css.trim()}\n</style>` : ''
+  const safe = sanitizeHeadAssets({ links, css })
+  const linkPart = safe.links.filter(Boolean).join('\n')
+  const stylePart = safe.css.trim() ? `<style>\n${safe.css.trim()}\n</style>` : ''
   return [linkPart, stylePart].filter(Boolean).join('\n\n').trim()
 }
 
@@ -910,11 +1250,121 @@ function convertAnchoredImagesToLinkMeta(html) {
   }
 }
 
+/**
+ * GrapesJS 직렬화 과정에서 빈 class 속성이 남는 케이스 정리.
+ * 예: <p class=""></p> -> <p></p>
+ */
+function stripEmptyClassAttributes(html) {
+  const src = String(html || '')
+  if (!src.trim()) return ''
+  if (typeof DOMParser === 'undefined') {
+    return src.replace(/\sclass=(['"])\s*\1/gi, '')
+  }
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    doc.body.querySelectorAll('[class]').forEach((el) => {
+      const v = el.getAttribute('class')
+      if (v == null || !String(v).trim()) el.removeAttribute('class')
+    })
+    return doc.body.innerHTML
+  } catch {
+    return src.replace(/\sclass=(['"])\s*\1/gi, '')
+  }
+}
+
+function collectIdsFromHtml(html) {
+  const out = new Set()
+  const src = String(html || '')
+  if (!src.trim()) return out
+  if (typeof DOMParser === 'undefined') return out
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    doc.body.querySelectorAll('[id]').forEach((el) => {
+      const id = String(el.getAttribute('id') || '').trim()
+      if (id) out.add(id)
+    })
+  } catch {
+    /* ignore */
+  }
+  return out
+}
+
+function mergeIdSet(targetSet, sourceSet) {
+  if (!targetSet || !sourceSet) return
+  sourceSet.forEach((id) => targetSet.add(id))
+}
+
+/**
+ * 코드 모달/내보내기 문자열에서만 GrapesJS 임시 id 제거.
+ * - 편집 런타임 DOM에는 손대지 않음
+ * - 사용자 정의 id(초기/적용 코드에서 수집)는 유지
+ */
+function stripTemporaryIdsForExport(html, preservedIds) {
+  const src = String(html || '')
+  if (!src.trim()) return ''
+  if (typeof DOMParser === 'undefined') return src
+  const preserve = preservedIds instanceof Set ? preservedIds : new Set()
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    doc.body.querySelectorAll('[id]').forEach((el) => {
+      const id = String(el.getAttribute('id') || '').trim()
+      if (!id) return
+      if (preserve.has(id)) return
+      if (isLikelyGrapesAutoId(id)) el.removeAttribute('id')
+    })
+    return doc.body.innerHTML
+  } catch {
+    return src
+  }
+}
+
+/**
+ * GrapesJS 캔버스(iframe) 런타임 DOM에서 빈 class 속성 제거.
+ * 편집 중 내부 동기화로 class=""가 재생성될 수 있어 이벤트마다 정리한다.
+ */
+function removeEmptyClassAttrsInCanvas(editor) {
+  try {
+    const doc = editor?.Canvas?.getDocument?.()
+    const body = doc?.body
+    if (!body) return
+    body.querySelectorAll('[class]').forEach((el) => {
+      const classValue = el.getAttribute('class')
+      if (classValue == null || !String(classValue).trim()) el.removeAttribute('class')
+    })
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * GrapesJS 컴포넌트 모델 attributes에서 빈 class 제거.
+ * 모델에 class: ''가 남아 있으면 렌더링 시 DOM에 class=""가 재주입될 수 있다.
+ */
+function removeEmptyClassAttrsInComponentTree(component) {
+  if (!component || typeof component.getAttributes !== 'function') return
+  try {
+    const attrs = component.getAttributes() || {}
+    if (Object.prototype.hasOwnProperty.call(attrs, 'class') && !String(attrs.class || '').trim()) {
+      const { class: _omitClass, ...rest } = attrs
+      component.setAttributes?.(rest)
+    }
+  } catch {
+    /* ignore */
+  }
+  const children = component.components?.()
+  if (children && typeof children.forEach === 'function') {
+    children.forEach((child) => removeEmptyClassAttrsInComponentTree(child))
+  }
+}
+
 function getCanvasDomHtmlSnapshot(editor) {
   try {
     const doc = editor?.Canvas?.getDocument?.()
     const body = doc?.body
-    if (!body) return ''
+    if (!body) return null
     const clone = body.cloneNode(true)
 
     // Grapes 캔버스 내부 CSS 룰(#id { ... })을 해당 요소 인라인 style로 흡수
@@ -949,29 +1399,37 @@ function getCanvasDomHtmlSnapshot(editor) {
       if (el.getAttribute('draggable') === 'true') el.removeAttribute('draggable')
       if (el.getAttribute('spellcheck') != null) el.removeAttribute('spellcheck')
     })
-    return clone.innerHTML || ''
+    const fromComps = getTopLevelComponentExportMarkupFromClone(editor, body, clone)
+    if (fromComps != null) return stripSingleAutoEmptyPlaceholderHtml(fromComps)
+    return stripSingleAutoEmptyPlaceholderHtml(clone.innerHTML || '')
   } catch {
-    return ''
+    return null
   }
 }
 
-function getExportHtml(editor, headAssets) {
+function getExportHtml(editor, headAssets, preservedIds) {
   if (!editor) return ''
   const domHtml = getCanvasDomHtmlSnapshot(editor)
-  const sourceHtml = domHtml || editor.getHtml() || ''
-  const html = convertImageLinkMetaToAnchors(sourceHtml)
-  const head = composeHeadAssetsMarkup(headAssets || {})
-  return (head ? `${head}\n\n` : '') + html
+  const raw = domHtml ?? getTopLevelComponentHtmlFromGetHtml(editor) ?? ''
+  const sourceHtml = stripRuntimeStyleTagsFromHtml(raw)
+  const html = stripTemporaryIdsForExport(
+    stripEmptyClassAttributes(convertImageLinkMetaToAnchors(sourceHtml)),
+    preservedIds,
+  )
+  const htmlWithBody = /<body\b/i.test(html) ? html : `<body>\n${html}\n</body>`
+  const head = composeHeadAssetsMarkup(sanitizeHeadAssets(headAssets || {}))
+  return (head ? `${head}\n\n` : '') + htmlWithBody
 }
 
 function injectCanvasHeadAssets(editor, { links = [], css = '' }) {
+  const safe = sanitizeHeadAssets({ links, css })
   const doc = editor.Canvas.getDocument()
   const head = doc?.head
   if (!head) return
 
   head.querySelectorAll('[data-be-head-asset="1"]').forEach((el) => el.remove())
 
-  links.forEach((tag) => {
+  safe.links.forEach((tag) => {
     const tpl = doc.createElement('template')
     tpl.innerHTML = String(tag || '').trim()
     const el = tpl.content.firstElementChild
@@ -981,10 +1439,10 @@ function injectCanvasHeadAssets(editor, { links = [], css = '' }) {
     }
   })
 
-  if (css.trim()) {
+  if (safe.css.trim()) {
     const styleEl = doc.createElement('style')
     styleEl.setAttribute('data-be-head-asset', '1')
-    styleEl.textContent = css
+    styleEl.textContent = safe.css
     head.appendChild(styleEl)
   }
 }
@@ -1002,10 +1460,37 @@ function splitHtmlAndScripts(htmlChunk) {
   }
 }
 
+/**
+ * 코드 모달 적용 시, 전체 문서(<html>/<body>)가 들어오면 body 내부만 컴포넌트로 사용한다.
+ * GrapesJS setComponents()는 body 래퍼보다 body 내부 마크업이 안정적이다.
+ */
+function extractBodyHtmlIfDocument(html) {
+  const src = String(html || '').trim()
+  if (!src) return ''
+  if (typeof DOMParser === 'undefined') return src
+  const hasBodyOrHtmlTag = /<body\b|<html\b/i.test(src)
+  if (!hasBodyOrHtmlTag) return src
+  try {
+    const doc = new DOMParser().parseFromString(src, 'text/html')
+    const bodyInner = String(doc.body?.innerHTML || '').trim()
+    return bodyInner || src
+  } catch {
+    return src
+  }
+}
+
 function parseCodeModalSections(fullText) {
   const { css, links, html } = splitHeadAssetsAndHtml(fullText)
   const { htmlOnly, scriptsJoined } = splitHtmlAndScripts(html)
   return { css: css.trim(), links, htmlOnly, scriptsJoined }
+}
+
+function normalizeHtmlTabValue(htmlText) {
+  const src = String(htmlText || '').trim()
+  if (!src) return ''
+  // 완전히 빈 body 래퍼는 HTML 탭에서 빈 문자열로 표시
+  if (/^<body\b[^>]*>\s*<\/body>$/i.test(src)) return ''
+  return htmlText
 }
 
 function composeCodeModalSections({ links = [], css, htmlOnly, scriptsJoined }) {
@@ -1023,10 +1508,23 @@ async function formatDocumentWithPrettier(text) {
   const postcssPlugin = await import('prettier/plugins/postcss')
   const htmlPl = htmlPlugin.default ?? htmlPlugin
   const postcssPl = postcssPlugin.default ?? postcssPlugin
+  const commonOptions = {
+    printWidth: 80,
+    tabWidth: 2,
+    useTabs: false,
+    semi: true,
+    singleQuote: true,
+    trailingComma: 'es5',
+    bracketSpacing: true,
+    arrowParens: 'always',
+    endOfLine: 'lf',
+    bracketSameLine: false,
+    htmlWhitespaceSensitivity: 'css',
+  }
   return prettier.format(String(text || ''), {
     parser: 'html',
     plugins: [htmlPl, postcssPl],
-    printWidth: 100,
+    ...commonOptions,
   })
 }
 
@@ -1059,6 +1557,53 @@ function applyCanvasFramePx(editor, px, { skipRefresh = false } = {}) {
   }
 }
 
+function releaseCanvasFramePx(editor) {
+  try {
+    const iframe = editor.Canvas.getFrameEl()
+    if (!iframe) return
+    iframe.style.height = 'auto'
+    iframe.style.minHeight = '0px'
+    const wrap = iframe.closest('.gjs-frame-wrapper')
+    if (wrap) {
+      wrap.style.height = 'auto'
+      wrap.style.minHeight = '0px'
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function measureCanvasContentHeightPx(editor, { min = 320 } = {}) {
+  try {
+    const wrapperEl = editor.getWrapper?.()?.getEl?.()
+    let wrapperChildrenExtent = 0
+    if (wrapperEl?.getBoundingClientRect) {
+      const wrapRect = wrapperEl.getBoundingClientRect()
+      const kids = Array.from(wrapperEl.children || [])
+      if (kids.length) {
+        kids.forEach((child) => {
+          const r = child?.getBoundingClientRect?.()
+          if (!r) return
+          wrapperChildrenExtent = Math.max(wrapperChildrenExtent, Math.round(r.bottom - wrapRect.top))
+        })
+      }
+    }
+    // 핵심: body/root 높이는 iframe viewport(이전 잠금값)에 끌려 커질 수 있어
+    // "현재 블록 실제 콘텐츠" 기준인 wrapper 자식 extent를 우선한다.
+    const byChildren = Math.round(Number(wrapperChildrenExtent) || 0)
+    if (byChildren > 0) return Math.max(byChildren, min)
+
+    // 자식 extent를 못 구하는 초기 타이밍에서만 wrapper 높이로 보완
+    const byWrapper = Math.max(
+      Math.round(Number(wrapperEl?.scrollHeight || 0)),
+      Math.round(Number(wrapperEl?.offsetHeight || 0)),
+    )
+    return Math.max(byWrapper, min)
+  } catch {
+    return min
+  }
+}
+
 /**
  * iframe/래퍼 높이를 잠긴 픽셀(px)로 맞춤.
  * lockRef.current 에 숫자가 있으면 편집 중에는 재측정 없이 유지하고,
@@ -1079,24 +1624,20 @@ function syncCanvasFrameHeight(editor, lockRef, { reset = false } = {}) {
 
     clearPendingFrameMeasures(editor)
     if (reset) lockRef.current = null
-
-    let sessionMax = 320
+    if (reset) releaseCanvasFramePx(editor)
+    // vh 기반 블록은 iframe viewport가 작으면 자기참조적으로 작게 계산될 수 있어,
+    // reset 사이클 시작 시 충분한 프로브 높이로 한 번 렌더해 실측 기준점을 확보한다.
+    const probePx = Math.max(320, Math.min(1600, Math.round((window?.innerHeight || 900) * 0.95)))
+    if (reset) applyCanvasFramePx(editor, probePx, { skipRefresh: true })
     const handles = { timeouts: [], rafs: [] }
     pendingFrameMeasureHandles.set(editor, handles)
 
     const measure = () => {
       try {
         if (!editor.Canvas?.getFrameEl()) return
-        const h = Math.max(
-          body.scrollHeight,
-          rootEl.scrollHeight,
-          body.offsetHeight,
-          rootEl.offsetHeight,
-          320,
-        )
-        sessionMax = Math.max(sessionMax, h)
-        lockRef.current = sessionMax
-        applyCanvasFramePx(editor, sessionMax)
+        const h = measureCanvasContentHeightPx(editor, { min: 320 })
+        lockRef.current = h
+        applyCanvasFramePx(editor, h)
       } catch {
         /* ignore */
       }
@@ -1396,6 +1937,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const savedRangeRef = useRef(null)
   const iframeKeydownRef = useRef(null)
   const headAssetsRef = useRef({ links: [], css: '' })
+  const preservedExportIdsRef = useRef(new Set())
   /** 캔버스 iframe 고정 높이(px). 코드 보기 적용 시에만 재측정 */
   const canvasFrameLockRef = useRef(null)
   const codeOpenTextRef = useRef('')
@@ -1411,9 +1953,16 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const [modalImage, setModalImage] = useState({ open: false, url: '', mode: 'insert' })
   const [modalVideo, setModalVideo] = useState({ open: false, url: '' })
   const [modalCode, setModalCode] = useState({ open: false, text: '' })
+  const [codeModalDraft, setCodeModalDraft] = useState({
+    css: '',
+    links: [],
+    htmlOnly: '',
+    scriptsJoined: '',
+  })
   /** 코드 모달: 전체 | HTML(스크립트 제외) | CSS | 스크립트 */
   const [codeModalTab, setCodeModalTab] = useState('all')
   const [codeModalLoading, setCodeModalLoading] = useState(false)
+  const [codeEditorResetSeq, setCodeEditorResetSeq] = useState(0)
   const [codeApplyState, setCodeApplyState] = useState({
     status: 'idle', // idle | applying | failure
     message: '',
@@ -1669,19 +2218,63 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
 
     editor.on('canvas:frame:load:body', applyAutoFrameHeight)
     editor.on('canvas:update', enforceLockedFrameSize)
+    editor.on('canvas:update', () => removeEmptyClassAttrsInCanvas(editor))
 
     const parsedInitial = splitHeadAssetsAndHtml(initialHtml)
-    headAssetsRef.current = { links: parsedInitial.links, css: parsedInitial.css }
+    headAssetsRef.current = sanitizeHeadAssets({ links: parsedInitial.links, css: parsedInitial.css })
+    preservedExportIdsRef.current = collectIdsFromHtml(parsedInitial.html)
     editor.setComponents(parsedInitial.html)
 
     let removeRteToolbarCapture = null
     let removeImgScrollListener = null
+    let disconnectEmptyClassObserver = null
 
     editor.on('load', () => {
       editorLoaded = true
       injectCanvasHeadAssets(editor, headAssetsRef.current)
       configureWrapper(editor)
       markEditableTree(editor.getWrapper())
+      removeEmptyClassAttrsInComponentTree(editor.getWrapper())
+      removeEmptyClassAttrsInCanvas(editor)
+      try {
+        const doc = editor.Canvas.getDocument()
+        const body = doc?.body
+        if (body && typeof MutationObserver !== 'undefined') {
+          const observer = new MutationObserver((mutations) => {
+            mutations.forEach((m) => {
+              if (m.type === 'attributes') {
+                const el = m.target
+                if (el?.nodeType === 1 && m.attributeName === 'class') {
+                  const classValue = el.getAttribute('class')
+                  if (classValue == null || !String(classValue).trim()) el.removeAttribute('class')
+                }
+                return
+              }
+              m.addedNodes?.forEach?.((node) => {
+                if (!node || node.nodeType !== 1) return
+                const el = node
+                if (el.hasAttribute?.('class')) {
+                  const classValue = el.getAttribute('class')
+                  if (classValue == null || !String(classValue).trim()) el.removeAttribute('class')
+                }
+                el.querySelectorAll?.('[class]')?.forEach?.((child) => {
+                  const classValue = child.getAttribute('class')
+                  if (classValue == null || !String(classValue).trim()) child.removeAttribute('class')
+                })
+              })
+            })
+          })
+          observer.observe(body, {
+            subtree: true,
+            childList: true,
+            attributes: true,
+            attributeFilter: ['class'],
+          })
+          disconnectEmptyClassObserver = () => observer.disconnect()
+        }
+      } catch {
+        disconnectEmptyClassObserver = null
+      }
       syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: false })
       const frame = editor.Canvas.getFrameEl()
       const onFrameKeydown = (e) => {
@@ -1748,14 +2341,19 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       setImgToolbar(initialImgToolbarState)
     })
     editor.on('component:update', (cmp) => {
+      removeEmptyClassAttrsInComponentTree(cmp || editor.getWrapper())
+      removeEmptyClassAttrsInCanvas(editor)
       const ed = editorRef.current
       if (ed && cmp === ed.getSelected?.()) scheduleImgToolbar(cmp)
     })
     editor.on('component:add', (cmp) => {
+      removeEmptyClassAttrsInComponentTree(cmp || editor.getWrapper())
+      removeEmptyClassAttrsInCanvas(editor)
       if (!editorLoaded || !isImgComponent(cmp)) return
       fitImageWidthToParent(editor, cmp)
     })
     editor.on('component:drag:end', (payload) => {
+      removeEmptyClassAttrsInCanvas(editor)
       const ed = editorRef.current
       if (!ed) return
       const dragged = payload?.target || payload
@@ -1853,6 +2451,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       window.removeEventListener('resize', onWinResize)
       removeImgScrollListener?.()
       removeRteToolbarCapture?.()
+      disconnectEmptyClassObserver?.()
       if (enforceLockRaf != null) cancelAnimationFrame(enforceLockRaf)
       clearPendingFrameMeasures(editor)
       shellEl?.removeEventListener('keydown', onShellKeydown, true)
@@ -1917,12 +2516,13 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const openCodeModal = () => {
     const ed = editorRef.current
     if (!ed) return
-    const raw = getExportHtml(ed, headAssetsRef.current)
+    const raw = getExportHtml(ed, headAssetsRef.current, preservedExportIdsRef.current)
     setCodeApplyState({ status: 'idle', message: '', details: '' })
     codeOpenTextRef.current = ''
     setCodeModalTab('all')
     setCodeModalLoading(true)
     setModalCode({ open: true, text: raw })
+    setCodeModalDraft(parseCodeModalSections(raw))
     void (async () => {
       let next = raw
       try {
@@ -1931,6 +2531,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
         console.error('코드 모달 자동 Prettier 실패:', err)
       }
       setModalCode((m) => (m.open ? { ...m, text: next } : m))
+      setCodeModalDraft(parseCodeModalSections(next))
       codeOpenTextRef.current = next
       setCodeModalLoading(false)
     })()
@@ -1942,12 +2543,17 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     setCodeModalLoading(false)
     setCodeApplyState({ status: 'idle', message: '', details: '' })
     setModalCode({ open: false, text: '' })
+    setCodeModalDraft({ css: '', links: [], htmlOnly: '', scriptsJoined: '' })
+    setCodeEditorResetSeq(0)
   }
 
   const formatCodeWithPrettier = async () => {
     try {
-      const formatted = await formatDocumentWithPrettier(modalCode.text)
+      const source = codeModalTab === 'all' ? modalCode.text : composeCodeModalSections(codeModalDraft)
+      const formatted = await formatDocumentWithPrettier(source)
       setModalCode((m) => ({ ...m, text: formatted }))
+      setCodeModalDraft(parseCodeModalSections(formatted))
+      setCodeEditorResetSeq((n) => n + 1)
       // codeOpenTextRef 는 모달 최초 오픈 시점(자동 Prettier 완료) 문자열만 유지.
       // 여기서 갱신하면 적용 시 "변경 없음"으로 오판해 setComponents 가 스킵되는 버그가 난다.
     } catch (err) {
@@ -1955,20 +2561,18 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     }
   }
 
-  const codeModalSections = useMemo(() => parseCodeModalSections(modalCode.text), [modalCode.text])
-
   const codeEditorPane = useMemo(() => {
     switch (codeModalTab) {
       case 'html':
-        return { value: codeModalSections.htmlOnly, language: 'html' }
+        return { value: normalizeHtmlTabValue(codeModalDraft.htmlOnly), language: 'html' }
       case 'style':
-        return { value: codeModalSections.css, language: 'css' }
+        return { value: codeModalDraft.css, language: 'css' }
       case 'script':
-        return { value: codeModalSections.scriptsJoined, language: 'html' }
+        return { value: codeModalDraft.scriptsJoined, language: 'html' }
       default:
         return { value: modalCode.text, language: 'html' }
     }
-  }, [codeModalTab, codeModalSections, modalCode.text])
+  }, [codeModalTab, codeModalDraft, modalCode.text])
 
   const onCodeEditorChange = useCallback(
     (v) => {
@@ -1977,39 +2581,49 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
         setModalCode((m) => ({ ...m, text: val }))
         return
       }
-      const parsed = parseCodeModalSections(modalCode.text)
       if (codeModalTab === 'html') {
-        setModalCode((m) => ({ ...m, text: composeCodeModalSections({ ...parsed, htmlOnly: val }) }))
+        setCodeModalDraft((prev) => ({ ...prev, htmlOnly: val }))
       } else if (codeModalTab === 'style') {
-        setModalCode((m) => ({ ...m, text: composeCodeModalSections({ ...parsed, css: val }) }))
+        setCodeModalDraft((prev) => ({ ...prev, css: val }))
       } else if (codeModalTab === 'script') {
-        setModalCode((m) => ({ ...m, text: composeCodeModalSections({ ...parsed, scriptsJoined: val }) }))
+        setCodeModalDraft((prev) => ({ ...prev, scriptsJoined: val }))
       }
     },
-    [codeModalTab, modalCode.text],
+    [codeModalTab],
+  )
+
+  const switchCodeModalTab = useCallback(
+    (nextTab) => {
+      if (nextTab === codeModalTab) return
+      if (nextTab === 'all') {
+        const merged = composeCodeModalSections(codeModalDraft)
+        setModalCode((m) => (m.text === merged ? m : { ...m, text: merged }))
+      } else if (codeModalTab === 'all') {
+        // 전체 탭 편집본을 분리 탭 draft로 1회 동기화
+        setCodeModalDraft(parseCodeModalSections(modalCode.text))
+      }
+      setCodeModalTab(nextTab)
+    },
+    [codeModalDraft, codeModalTab, modalCode.text],
   )
 
   const applyCodeModal = () => {
     const ed = editorRef.current
     if (!ed) return
     if (codeModalLoading) return
+    const workingText = codeModalTab === 'all' ? modalCode.text : composeCodeModalSections(codeModalDraft)
     setCodeApplyState({ status: 'applying', message: '코드를 적용하는 중입니다...', details: '' })
-    if (modalCode.text.trim() === codeOpenTextRef.current.trim()) {
+    if (workingText.trim() === codeOpenTextRef.current.trim()) {
       closeCodeModal()
       return
     }
-    const { links, css, html } = splitHeadAssetsAndHtml(modalCode.text)
-    const nextHtml = convertAnchoredImagesToLinkMeta(html).trim()
-    if (!nextHtml) {
-      setCodeApplyState({
-        status: 'failure',
-        message: '적용할 HTML이 비어 있습니다. 태그를 확인해 주세요.',
-        details: '',
-      })
-      return
-    }
+    const { links, css, html } = splitHeadAssetsAndHtml(workingText)
+    const bodyHtml = extractBodyHtmlIfDocument(html)
+    const nextHtml = convertAnchoredImagesToLinkMeta(bodyHtml).trim()
+    mergeIdSet(preservedExportIdsRef.current, collectIdsFromHtml(bodyHtml))
 
     try {
+      // HTML을 완전히 비운 경우도 정상 시나리오로 허용하여 캔버스를 빈 상태로 만든다.
       ed.setComponents(nextHtml)
     } catch (err) {
       console.error('코드 적용 실패(setComponents):', err)
@@ -2021,12 +2635,15 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       return
     }
 
-    headAssetsRef.current = { links, css }
+    headAssetsRef.current = sanitizeHeadAssets({ links, css })
     injectCanvasHeadAssets(ed, headAssetsRef.current)
+    removeEmptyClassAttrsInCanvas(ed)
 
     try {
       configureWrapper(ed)
       markEditableTree(ed.getWrapper())
+      removeEmptyClassAttrsInComponentTree(ed.getWrapper())
+      removeEmptyClassAttrsInCanvas(ed)
       ed.getModel().getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
       syncCanvasFrameHeight(ed, canvasFrameLockRef, { reset: true })
       ed.refresh?.()
@@ -2046,7 +2663,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const handleSave = () => {
     const ed = editorRef.current
     if (!ed) return
-    const exported = getExportHtml(ed, headAssetsRef.current)
+    const exported = getExportHtml(ed, headAssetsRef.current, preservedExportIdsRef.current)
     console.log(exported)
     console.log('저장이 완료되었습니다!')
   }
@@ -2350,7 +2967,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                   aria-selected={codeModalTab === t.id}
                   className={`be-code-modal__tab${codeModalTab === t.id ? ' be-code-modal__tab--active' : ''}`}
                   disabled={codeModalLoading}
-                  onClick={() => setCodeModalTab(t.id)}
+                  onClick={() => switchCodeModalTab(t.id)}
                 >
                   {t.label}
                 </button>
@@ -2361,11 +2978,11 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                 <div className="be-code-modal__loading">코드를 정리하는 중…</div>
               ) : (
                 <Editor
-                  key={codeModalTab}
+                  key={`${codeModalTab}:${codeEditorResetSeq}`}
                   height="480px"
                   language={codeEditorPane.language}
                   theme="vs-dark"
-                  value={codeEditorPane.value}
+                  defaultValue={codeEditorPane.value}
                   onChange={onCodeEditorChange}
                   options={{
                     fontSize: 13,
