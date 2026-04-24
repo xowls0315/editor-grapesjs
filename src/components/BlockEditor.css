@@ -246,7 +246,7 @@
   min-height: 200px;
   overflow: visible !important;
   background: #fff;
-  border-radius: 12px;
+  border-radius: 0;
   box-shadow: 0 4px 24px rgba(15, 23, 42, 0.08);
 }
 
@@ -268,7 +268,7 @@
   left: auto !important;
   right: auto !important;
   border: none;
-  border-radius: 12px;
+  border-radius: 0;
   display: block;
   width: 100% !important;
 }

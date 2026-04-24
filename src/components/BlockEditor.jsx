@@ -1230,9 +1230,16 @@ function convertAnchoredImagesToLinkMeta(html) {
     const anchors = body.querySelectorAll('a[href]')
 
     anchors.forEach((a) => {
-      const imgs = Array.from(a.querySelectorAll('img'))
-      if (imgs.length !== 1) return
-      const img = imgs[0]
+      // "순수 이미지 링크"만 변환:
+      // <a><img ... /></a> 형태(공백 텍스트만 허용), 카드/복합 콘텐츠 링크는 유지
+      const elementChildren = Array.from(a.children || [])
+      if (elementChildren.length !== 1) return
+      const onlyChild = elementChildren[0]
+      if (!onlyChild || String(onlyChild.tagName || '').toLowerCase() !== 'img') return
+      const textNodes = Array.from(a.childNodes || []).filter((n) => n.nodeType === Node.TEXT_NODE)
+      const hasMeaningfulText = textNodes.some((n) => String(n.textContent || '').replace(/\u00a0/g, ' ').trim().length > 0)
+      if (hasMeaningfulText) return
+      const img = onlyChild
       const href = (a.getAttribute('href') || '').trim()
       if (!href) return
       const target = (a.getAttribute('target') || '_blank').trim() || '_blank'
@@ -1557,6 +1564,65 @@ function applyCanvasFramePx(editor, px, { skipRefresh = false } = {}) {
   }
 }
 
+/**
+ * 캔버스 iframe 기준: 이 높이일 때 100vh == 1080px (vh 단위는 iframe 뷰포트 기준이라 고정 뷰포트로 맞춤)
+ * 메인 window 높이는 사용하지 않는다.
+ */
+const EDITOR_CANVAS_100VH_PX = 1080
+
+function convertVhUnitsToPxInText(text, basePx = EDITOR_CANVAS_100VH_PX) {
+  return String(text || '').replace(/(-?\d*\.?\d+)vh\b/gi, (_, n) => {
+    const num = Number(n)
+    if (!Number.isFinite(num)) return _
+    const px = (num * basePx) / 100
+    const rounded = Math.round(px * 1000) / 1000
+    return `${rounded}px`
+  })
+}
+
+/**
+ * 캔버스 반영 전, 인라인 style 속성의 vh 단위를 px(100vh=1080px)로 고정 변환
+ */
+function convertInlineStyleVhToPx(html, basePx = EDITOR_CANVAS_100VH_PX) {
+  const src = String(html || '')
+  if (!src.trim()) return ''
+  if (typeof DOMParser === 'undefined') return src
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    doc.body.querySelectorAll('[style]').forEach((el) => {
+      const st = el.getAttribute('style')
+      if (!st) return
+      el.setAttribute('style', convertVhUnitsToPxInText(st, basePx))
+    })
+    return doc.body.innerHTML
+  } catch {
+    return src
+  }
+}
+
+/**
+ * 코드 모달 적용 시 인라인 이벤트 핸들러(onclick 등)를 제거해
+ * 캔버스 편집 중 의도치 않은 페이지 이동/스크립트 실행을 막는다.
+ */
+function stripInlineEventHandlerAttrs(html) {
+  const src = String(html || '')
+  if (!src.trim()) return ''
+  if (typeof DOMParser === 'undefined') return src
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    doc.body.querySelectorAll('*').forEach((el) => {
+      Array.from(el.attributes || []).forEach((attr) => {
+        if (/^on/i.test(String(attr.name || ''))) el.removeAttribute(attr.name)
+      })
+    })
+    return doc.body.innerHTML
+  } catch {
+    return src
+  }
+}
+
 function releaseCanvasFramePx(editor) {
   try {
     const iframe = editor.Canvas.getFrameEl()
@@ -1609,7 +1675,7 @@ function measureCanvasContentHeightPx(editor, { min = 320 } = {}) {
  * lockRef.current 에 숫자가 있으면 편집 중에는 재측정 없이 유지하고,
  * 코드 보기에서 소스 적용 시에만 reset 으로 다시 잠급니다.
  */
-function syncCanvasFrameHeight(editor, lockRef, { reset = false } = {}) {
+function syncCanvasFrameHeight(editor, lockRef, { reset = false, vhBoost = false } = {}) {
   try {
     const iframe = editor.Canvas.getFrameEl()
     const doc = iframe?.contentDocument
@@ -1625,9 +1691,11 @@ function syncCanvasFrameHeight(editor, lockRef, { reset = false } = {}) {
     clearPendingFrameMeasures(editor)
     if (reset) lockRef.current = null
     if (reset) releaseCanvasFramePx(editor)
-    // vh 기반 블록은 iframe viewport가 작으면 자기참조적으로 작게 계산될 수 있어,
-    // reset 사이클 시작 시 충분한 프로브 높이로 한 번 렌더해 실측 기준점을 확보한다.
-    const probePx = Math.max(320, Math.min(1600, Math.round((window?.innerHeight || 900) * 0.95)))
+    // vh 기반: 메인 window 대신 "100vh=1080px" 고정 뷰포트로 프로브
+    // 그 외: iframe이 너무 작을 때 측정이 무너지지 않게 기존 범위로 프로브
+    const probePx = vhBoost
+      ? Math.max(320, Math.min(2000, EDITOR_CANVAS_100VH_PX))
+      : Math.max(320, Math.min(1600, Math.round((window?.innerHeight || 900) * 0.95)))
     if (reset) applyCanvasFramePx(editor, probePx, { skipRefresh: true })
     const handles = { timeouts: [], rafs: [] }
     pendingFrameMeasureHandles.set(editor, handles)
@@ -1635,7 +1703,8 @@ function syncCanvasFrameHeight(editor, lockRef, { reset = false } = {}) {
     const measure = () => {
       try {
         if (!editor.Canvas?.getFrameEl()) return
-        const h = measureCanvasContentHeightPx(editor, { min: 320 })
+        let h = measureCanvasContentHeightPx(editor, { min: 320 })
+        if (vhBoost) h = Math.max(h, EDITOR_CANVAS_100VH_PX)
         lockRef.current = h
         applyCanvasFramePx(editor, h)
       } catch {
@@ -1851,6 +1920,9 @@ function applyImageSrcToComponent(editor, component, srcRaw) {
 
 function fitImageWidthToParent(editor, component) {
   if (!editor || !isImgComponent(component)) return
+  const attrs = component.getAttributes?.() || {}
+  // 템플릿 이미지(클래스 지정)는 기존 CSS 레이아웃을 존중한다.
+  if (String(attrs.class || '').trim()) return
   const currentStyle = component.getStyle?.() || {}
   // 이미 폭 정책이 있는 이미지는 보정하지 않음(템플릿/수동 삽입 보존)
   if (currentStyle.width || currentStyle['max-width']) return
@@ -1869,8 +1941,8 @@ function fitImageWidthToParent(editor, component) {
       height: 'auto',
     })
 
-    const attrs = component.getAttributes?.() || {}
-    const { width: _w, height: _h, ...rest } = attrs
+    const nextAttrs = component.getAttributes?.() || {}
+    const { width: _w, height: _h, ...rest } = nextAttrs
     component.addAttributes?.(rest)
     notifyGrapesInputFromDomNode(editor, imageEl)
     return true
@@ -1940,6 +2012,10 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const preservedExportIdsRef = useRef(new Set())
   /** 캔버스 iframe 고정 높이(px). 코드 보기 적용 시에만 재측정 */
   const canvasFrameLockRef = useRef(null)
+  /** 코드 모달 setComponents 중 템플릿 이미지 자동 폭 보정을 잠시 비활성화 */
+  const suppressImageAutoFitRef = useRef(false)
+  /** 소스에 `vh` 포함 시: 캔버스에서 100vh == 1080px 기준(EDITOR_CANVAS_100VH_PX)으로 최소 높이 보강 */
+  const canvasVhBoostRef = useRef(false)
   const codeOpenTextRef = useRef('')
   /** RTE 링크 버튼 → 상단과 동일한 링크 모달 (selection 은 savedRangeRef 에 저장) */
   const openRteLinkModalRef = useRef(() => {})
@@ -2202,7 +2278,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       // grapesjs.init() 반환값은 Editor 뷰 — Frame API는 EditorModel(em)에 있음
       editor.getModel().getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
       injectCanvasHeadAssets(editor, headAssetsRef.current)
-      syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: false })
+      syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: false, vhBoost: canvasVhBoostRef.current })
     }
 
     let enforceLockRaf = null
@@ -2221,9 +2297,12 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     editor.on('canvas:update', () => removeEmptyClassAttrsInCanvas(editor))
 
     const parsedInitial = splitHeadAssetsAndHtml(initialHtml)
-    headAssetsRef.current = sanitizeHeadAssets({ links: parsedInitial.links, css: parsedInitial.css })
-    preservedExportIdsRef.current = collectIdsFromHtml(parsedInitial.html)
-    editor.setComponents(parsedInitial.html)
+    const initialHtmlPx = convertInlineStyleVhToPx(parsedInitial.html, EDITOR_CANVAS_100VH_PX)
+    const initialCssPx = convertVhUnitsToPxInText(parsedInitial.css, EDITOR_CANVAS_100VH_PX)
+    headAssetsRef.current = sanitizeHeadAssets({ links: parsedInitial.links, css: initialCssPx })
+    preservedExportIdsRef.current = collectIdsFromHtml(initialHtmlPx)
+    canvasVhBoostRef.current = false
+    editor.setComponents(initialHtmlPx)
 
     let removeRteToolbarCapture = null
     let removeImgScrollListener = null
@@ -2275,7 +2354,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       } catch {
         disconnectEmptyClassObserver = null
       }
-      syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: false })
+      syncCanvasFrameHeight(editor, canvasFrameLockRef, { reset: true, vhBoost: canvasVhBoostRef.current })
       const frame = editor.Canvas.getFrameEl()
       const onFrameKeydown = (e) => {
         if (anyModalOpenRef.current) return
@@ -2349,6 +2428,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     editor.on('component:add', (cmp) => {
       removeEmptyClassAttrsInComponentTree(cmp || editor.getWrapper())
       removeEmptyClassAttrsInCanvas(editor)
+      if (suppressImageAutoFitRef.current) return
       if (!editorLoaded || !isImgComponent(cmp)) return
       fitImageWidthToParent(editor, cmp)
     })
@@ -2618,14 +2698,20 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       return
     }
     const { links, css, html } = splitHeadAssetsAndHtml(workingText)
-    const bodyHtml = extractBodyHtmlIfDocument(html)
+    const bodyHtml = stripInlineEventHandlerAttrs(
+      convertInlineStyleVhToPx(extractBodyHtmlIfDocument(html), EDITOR_CANVAS_100VH_PX),
+    )
+    const cssPx = convertVhUnitsToPxInText(css, EDITOR_CANVAS_100VH_PX)
     const nextHtml = convertAnchoredImagesToLinkMeta(bodyHtml).trim()
     mergeIdSet(preservedExportIdsRef.current, collectIdsFromHtml(bodyHtml))
+    canvasVhBoostRef.current = false
 
     try {
       // HTML을 완전히 비운 경우도 정상 시나리오로 허용하여 캔버스를 빈 상태로 만든다.
+      suppressImageAutoFitRef.current = true
       ed.setComponents(nextHtml)
     } catch (err) {
+      suppressImageAutoFitRef.current = false
       console.error('코드 적용 실패(setComponents):', err)
       setCodeApplyState({
         status: 'failure',
@@ -2635,7 +2721,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       return
     }
 
-    headAssetsRef.current = sanitizeHeadAssets({ links, css })
+    headAssetsRef.current = sanitizeHeadAssets({ links, css: cssPx })
     injectCanvasHeadAssets(ed, headAssetsRef.current)
     removeEmptyClassAttrsInCanvas(ed)
 
@@ -2645,9 +2731,11 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       removeEmptyClassAttrsInComponentTree(ed.getWrapper())
       removeEmptyClassAttrsInCanvas(ed)
       ed.getModel().getCurrentFrameModel()?.set({ height: 'auto', minHeight: '200px' })
-      syncCanvasFrameHeight(ed, canvasFrameLockRef, { reset: true })
+      syncCanvasFrameHeight(ed, canvasFrameLockRef, { reset: true, vhBoost: canvasVhBoostRef.current })
       ed.refresh?.()
+      suppressImageAutoFitRef.current = false
     } catch (err) {
+      suppressImageAutoFitRef.current = false
       console.error('코드 적용 후처리 실패:', err)
       setCodeApplyState({
         status: 'failure',
@@ -2952,7 +3040,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                 닫기
               </button>
             </header>
-            <p className="be-code-modal__desc">블록 내보내기 HTML을 편집합니다. 적용하면 편집 상태가 복원됩니다.</p>
+            <p className="be-code-modal__desc">블록 내보내기 HTML을 편집합니다. 적용하면 편집 상태가 적용됩니다.</p>
             <div className="be-code-modal__tabs" role="tablist" aria-label="코드 영역">
               {[
                 { id: 'all', label: '전체' },
