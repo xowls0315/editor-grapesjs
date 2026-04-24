@@ -24,6 +24,8 @@ const TOOLBAR_TEXT_TAGS = new Set([
   'th',
 ])
 
+const DEFAULT_IMAGE_UPLOAD_ENDPOINT = 'http://localhost:3100/api/images/upload'
+
 function BeToolbarSvg({ children }) {
   return (
     <svg className="be-toolbar-svg" width={18} height={18} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden>
@@ -1918,6 +1920,74 @@ function applyImageSrcToComponent(editor, component, srcRaw) {
   }
 }
 
+function resolveImageUploadEndpoint() {
+  const env = import.meta?.env || {}
+  const direct = String(env.VITE_IMAGE_UPLOAD_ENDPOINT || '').trim()
+  if (direct) return direct
+  const base = String(env.VITE_BACKEND_BASE_URL || '').trim().replace(/\/+$/, '')
+  if (base) return `${base}/api/images/upload`
+  return DEFAULT_IMAGE_UPLOAD_ENDPOINT
+}
+
+function isDataImageSrc(srcRaw) {
+  return /^data:image\//i.test(String(srcRaw || '').trim())
+}
+
+function parseDataImageMeta(srcRaw) {
+  const src = String(srcRaw || '').trim()
+  const m = src.match(/^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/i)
+  if (!m) return null
+  return {
+    mimeType: (m[1] || '').toLowerCase(),
+    isBase64: !!m[2],
+    payload: m[3] || '',
+  }
+}
+
+function decodeDataImagePayload(srcRaw) {
+  const meta = parseDataImageMeta(srcRaw)
+  if (!meta) return null
+  try {
+    if (meta.isBase64) return atob(meta.payload)
+    return decodeURIComponent(meta.payload)
+  } catch {
+    return null
+  }
+}
+
+function isLikelyGrapesPlaceholderImageData(srcRaw) {
+  const meta = parseDataImageMeta(srcRaw)
+  if (!meta || meta.mimeType !== 'image/svg+xml') return false
+  const decoded = decodeDataImagePayload(srcRaw)
+  if (!decoded) return false
+  const text = String(decoded).toLowerCase()
+  // 드래그앤드롭 직후 GrapesJS가 넣는 임시 이미지(작은 svg 아이콘) 필터
+  return decoded.length <= 2000 && text.includes('<svg') && (text.includes('<rect') || text.includes('<path'))
+}
+
+function dataUrlToFile(dataUrl, fallbackName = 'image-upload') {
+  const m = String(dataUrl || '').match(/^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/i)
+  if (!m) return null
+  const mimeType = (m[1] || 'application/octet-stream').trim()
+  const payload = m[3] || ''
+  let bytes = null
+  const isBase64 = !!m[2]
+  try {
+    if (isBase64) {
+      const binary = atob(payload)
+      bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+    } else {
+      const decoded = decodeURIComponent(payload)
+      bytes = new TextEncoder().encode(decoded)
+    }
+  } catch {
+    return null
+  }
+  const ext = mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'bin'
+  return new File([bytes], `${fallbackName}.${ext}`, { type: mimeType })
+}
+
 function fitImageWidthToParent(editor, component) {
   if (!editor || !isImgComponent(component)) return
   const attrs = component.getAttributes?.() || {}
@@ -2023,10 +2093,13 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   const imageReplaceTargetRef = useRef(null)
   /** 요소 툴바 링크 버튼 적용 대상 */
   const componentLinkTargetRef = useRef(null)
+  /** data:image → 업로드 변환 중인 이미지 컴포넌트 중복 처리 방지 */
+  const imageUploadInFlightRef = useRef(new WeakSet())
   const rteActiveRef = useRef(false)
 
   const [modalLink, setModalLink] = useState({ open: false, url: '', mode: 'rte' })
   const [modalImage, setModalImage] = useState({ open: false, url: '', mode: 'insert' })
+  const [imageUploadBusy, setImageUploadBusy] = useState(false)
   const [modalVideo, setModalVideo] = useState({ open: false, url: '' })
   const [modalCode, setModalCode] = useState({ open: false, text: '' })
   const [codeModalDraft, setCodeModalDraft] = useState({
@@ -2063,6 +2136,70 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     if (!editor) return
     syncRteExtrasInputsFromCanvas(editor)
   }, [])
+
+  const uploadImageFileToServer = useCallback(async (file) => {
+    if (!file) throw new Error('업로드할 파일이 없습니다.')
+    const endpoint = resolveImageUploadEndpoint()
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!res.ok) {
+      let message = `이미지 업로드 실패 (${res.status})`
+      try {
+        const payload = await res.json()
+        const detail = payload?.message
+        if (Array.isArray(detail)) message = detail.join(', ')
+        else if (typeof detail === 'string') message = detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(message)
+    }
+
+    const data = await res.json()
+    const url = String(data?.url || '').trim()
+    if (!url) throw new Error('업로드 응답에 url이 없습니다.')
+    return url
+  }, [])
+
+  const normalizeImageSrcForCanvas = useCallback(
+    async (srcRaw, fallbackName = 'block-editor-image') => {
+      const src = String(srcRaw || '').trim()
+      if (!isDataImageSrc(src)) return src
+      const file = dataUrlToFile(src, fallbackName)
+      if (!file) throw new Error('data URL을 파일로 변환하지 못했습니다.')
+      return uploadImageFileToServer(file)
+    },
+    [uploadImageFileToServer],
+  )
+
+  const tryUploadImageComponentSrc = useCallback(
+    (ed, cmp, reason = 'component') => {
+      if (!ed || !cmp || !isImgComponent(cmp)) return
+      const attrs = cmp.getAttributes?.() || {}
+      const src = String(attrs.src || '').trim()
+      if (!isDataImageSrc(src)) return
+      if (isLikelyGrapesPlaceholderImageData(src)) return
+      if (imageUploadInFlightRef.current.has(cmp)) return
+
+      imageUploadInFlightRef.current.add(cmp)
+      void (async () => {
+        try {
+          const uploadedUrl = await normalizeImageSrcForCanvas(src, 'drag-drop-image')
+          applyImageSrcToComponent(ed, cmp, uploadedUrl)
+        } catch (err) {
+          console.error(`이미지 업로드 실패(${reason}):`, err)
+        } finally {
+          imageUploadInFlightRef.current.delete(cmp)
+        }
+      })()
+    },
+    [normalizeImageSrcForCanvas],
+  )
 
   useEffect(() => {
     if (!containerRef.current) return undefined
@@ -2256,6 +2393,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
         imageReplaceTargetRef.current = target
         const attrs = target.getAttributes?.() || {}
         const cur = attrs.src || ''
+        setImageUploadBusy(false)
         setModalImage({ open: true, url: cur, mode: 'replace' })
       },
     })
@@ -2423,6 +2561,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       removeEmptyClassAttrsInComponentTree(cmp || editor.getWrapper())
       removeEmptyClassAttrsInCanvas(editor)
       const ed = editorRef.current
+      if (ed) tryUploadImageComponentSrc(ed, cmp, 'component:update')
       if (ed && cmp === ed.getSelected?.()) scheduleImgToolbar(cmp)
     })
     editor.on('component:add', (cmp) => {
@@ -2430,6 +2569,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       removeEmptyClassAttrsInCanvas(editor)
       if (suppressImageAutoFitRef.current) return
       if (!editorLoaded || !isImgComponent(cmp)) return
+      tryUploadImageComponentSrc(editor, cmp, 'component:add')
       fitImageWidthToParent(editor, cmp)
     })
     editor.on('component:drag:end', (payload) => {
@@ -2438,6 +2578,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       if (!ed) return
       const dragged = payload?.target || payload
       if (!isImgComponent(dragged)) return
+      tryUploadImageComponentSrc(ed, dragged, 'component:drag:end')
       const next = ensureImageLinkWrapper(ed, dragged)
       if (next) {
         if (ed.getSelected?.() === dragged) ed.select(next)
@@ -2543,7 +2684,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
       editor.destroy()
       editorRef.current = null
     }
-  }, [refreshToolStyleFromSelection, initialHtml])
+  }, [refreshToolStyleFromSelection, initialHtml, tryUploadImageComponentSrc])
 
   const onToolbarPointerDown = () => {
     const ed = editorRef.current
@@ -2823,6 +2964,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
             title="이미지"
             onClick={() => {
               imageReplaceTargetRef.current = null
+              setImageUploadBusy(false)
               setModalImage({ open: true, url: '', mode: 'insert' })
             }}
           >
@@ -2940,12 +3082,19 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                 id="be-img-file"
                 type="file"
                 accept="image/*"
-                onChange={(e) => {
+                onChange={async (e) => {
                   const f = e.target.files?.[0]
                   if (!f) return
-                  const r = new FileReader()
-                  r.onload = () => setModalImage((m) => ({ ...m, url: String(r.result || '') }))
-                  r.readAsDataURL(f)
+                  setImageUploadBusy(true)
+                  try {
+                    const uploadedUrl = await uploadImageFileToServer(f)
+                    setModalImage((m) => ({ ...m, url: uploadedUrl }))
+                  } catch (err) {
+                    console.error('이미지 업로드 실패:', err)
+                  } finally {
+                    setImageUploadBusy(false)
+                    e.target.value = ''
+                  }
                 }}
               />
               <label htmlFor="be-img-url">이미지 URL</label>
@@ -2963,6 +3112,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                 className="be-btn"
                 onClick={() => {
                   imageReplaceTargetRef.current = null
+                  setImageUploadBusy(false)
                   setModalImage({ open: false, url: '', mode: 'insert' })
                 }}
               >
@@ -2971,10 +3121,19 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
               <button
                 type="button"
                 className="be-btn be-btn-primary"
-                onClick={() => {
+                disabled={imageUploadBusy}
+                onClick={async () => {
                   const ed = editorRef.current
-                  const src = modalImage.url.trim()
+                  let src = modalImage.url.trim()
                   if (!ed || !src) return
+                  setImageUploadBusy(true)
+                  try {
+                    src = await normalizeImageSrcForCanvas(src, 'modal-image')
+                  } catch (err) {
+                    console.error('이미지 업로드 실패:', err)
+                    setImageUploadBusy(false)
+                    return
+                  }
                   const mode = modalImage.mode || 'insert'
                   if (mode === 'replace') {
                     applyImageSrcToComponent(ed, imageReplaceTargetRef.current, src)
@@ -2985,10 +3144,15 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                       `<img src="${src.replace(/"/g, '&quot;')}" alt="" style="max-width:100%;height:auto;"/>`,
                     )
                   }
+                  setImageUploadBusy(false)
                   setModalImage({ open: false, url: '', mode: 'insert' })
                 }}
               >
-                {modalImage.mode === 'replace' ? '교체 적용' : '이미지 삽입'}
+                {imageUploadBusy
+                  ? '업로드 중...'
+                  : modalImage.mode === 'replace'
+                    ? '교체 적용'
+                    : '이미지 삽입'}
               </button>
             </div>
           </div>
