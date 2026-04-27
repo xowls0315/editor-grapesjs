@@ -1,7 +1,7 @@
 .be-root {
   --be-toolbar-h: 52px;
   --be-meta-h: 36px;
-  min-height: 100vh;
+  min-height: 0;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -206,11 +206,11 @@
 }
 
 .be-canvas-wrap {
-  flex: 1;
-  min-height: 400px;
+  flex: 0 0 auto;
+  min-height: 0;
   position: relative;
   padding: 12px;
-  overflow: auto;
+  overflow: visible;
 }
 
 /* GrapesJS: 에디터·캔버스를 콘텐츠 높이에 맞춤 (기본 overflow:hidden·고정 높이로 잘리는 문제 방지) */

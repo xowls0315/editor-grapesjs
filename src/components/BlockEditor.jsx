@@ -616,10 +616,203 @@ function cleanupSpanStyle(el) {
   if (!st) el?.removeAttribute?.('style')
 }
 
+/** 선택 영역이 요소의 `selectNodeContents` 범위와 시작·끝 경계까지 일치할 때만 true (부분 선택이면 false) */
+function rangeSelectsExactlyElementContents(range, el) {
+  if (!range || !el?.ownerDocument) return false
+  try {
+    const inner = el.ownerDocument.createRange()
+    inner.selectNodeContents(el)
+    return (
+      range.compareBoundaryPoints(Range.START_TO_START, inner) === 0 &&
+      range.compareBoundaryPoints(Range.END_TO_END, inner) === 0
+    )
+  } catch {
+    return false
+  }
+}
+
+/** style 속성 문자열 → 소문자 속성명 맵 */
+function parseInlineStyleToMap(styleAttr) {
+  const m = {}
+  if (!styleAttr || typeof styleAttr !== 'string') return m
+  for (const part of styleAttr.split(';')) {
+    const idx = part.indexOf(':')
+    if (idx === -1) continue
+    const key = part.slice(0, idx).trim().toLowerCase()
+    const val = part.slice(idx + 1).trim()
+    if (key) m[key] = val
+  }
+  return m
+}
+
+function styleMapToString(map) {
+  return Object.entries(map || {})
+    .filter(([, v]) => v != null && String(v).trim() !== '')
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('; ')
+}
+
+/** 바깥 span(이번에 적용한 스타일)이 이김 — 안쪽 legacy span과 합쳐 한 겹으로 만든다 */
+function mergeInlineStyleMaps(innerBase, outerOverlay) {
+  return { ...innerBase, ...outerOverlay }
+}
+
+/**
+ * 짧은 선택·반복 서식 시 span>span>… 중첩을 줄인다.
+ * 자식이 span 하나뿐이면 스타일 합친 뒤 자식을 펼친다(여러 겹 반복).
+ */
+function collapseNestedSpanChainIntoOuter(outerSpan) {
+  let el = outerSpan
+  if (!el || el.nodeType !== 1 || el.tagName !== 'SPAN') return el
+  while (el.childNodes.length === 1) {
+    const c = el.firstChild
+    if (!c || c.nodeType !== 1 || c.tagName !== 'SPAN') break
+    const inner = c
+    const merged = mergeInlineStyleMaps(
+      parseInlineStyleToMap(inner.getAttribute('style')),
+      parseInlineStyleToMap(el.getAttribute('style')),
+    )
+    const s = styleMapToString(merged)
+    if (s) el.setAttribute('style', s)
+    else el.removeAttribute('style')
+    while (inner.firstChild) el.insertBefore(inner.firstChild, inner)
+    inner.remove()
+    cleanupSpanStyle(el)
+  }
+  return el
+}
+
+function copySpanAttrsWithoutId(src, dst) {
+  if (!src?.attributes || !dst?.setAttribute) return
+  for (const attr of Array.from(src.attributes)) {
+    if (!attr?.name || attr.name.toLowerCase() === 'id') continue
+    dst.setAttribute(attr.name, attr.value)
+  }
+}
+
+function fragmentHasRenderableContent(fragment) {
+  if (!fragment) return false
+  for (const n of Array.from(fragment.childNodes || [])) {
+    if (n.nodeType === 1) return true
+    if (n.nodeType === 3 && String(n.nodeValue || '').length > 0) return true
+  }
+  return false
+}
+
+function styleHasDecorationToken(span, token) {
+  if (!span || !token) return false
+  const map = parseInlineStyleToMap(span.getAttribute('style') || '')
+  const raw = `${map['text-decoration-line'] || ''} ${map['text-decoration'] || ''}`.toLowerCase()
+  return raw.includes(token)
+}
+
+/** range를 포함하는 조상 span 중, 해당 token(text-decoration)이 걸려 있고 부분 선택인 첫 후보 */
+function findDecorationAncestorSpanForPartialRange(range, token) {
+  if (!range || !token) return null
+  let el = range.startContainer?.nodeType === 3 ? range.startContainer.parentElement : range.startContainer
+  while (el && el.nodeType === 1) {
+    if (el.tagName === 'SPAN') {
+      const containsStart = el.contains(range.startContainer)
+      const containsEnd = el.contains(range.endContainer)
+      if (
+        containsStart &&
+        containsEnd &&
+        styleHasDecorationToken(el, token) &&
+        !rangeSelectsExactlyElementContents(range, el)
+      ) {
+        return el
+      }
+    }
+    el = el.parentElement
+  }
+  return null
+}
+
+/** 조상 span을 before/selected/after 로 분할하고 selected span을 반환 */
+function splitAncestorSpanByRange(doc, ancestorSpan, range) {
+  if (!doc || !ancestorSpan || !range) return null
+  if (!ancestorSpan.contains(range.startContainer) || !ancestorSpan.contains(range.endContainer)) return null
+
+  try {
+    const full = doc.createRange()
+    full.selectNodeContents(ancestorSpan)
+
+    const beforeR = doc.createRange()
+    beforeR.setStart(full.startContainer, full.startOffset)
+    beforeR.setEnd(range.startContainer, range.startOffset)
+
+    const selR = range.cloneRange()
+
+    const afterR = doc.createRange()
+    afterR.setStart(range.endContainer, range.endOffset)
+    afterR.setEnd(full.endContainer, full.endOffset)
+
+    const beforeFrag = beforeR.cloneContents()
+    const selectedFrag = selR.cloneContents()
+    const afterFrag = afterR.cloneContents()
+
+    const out = doc.createDocumentFragment()
+    let selectedSpan = null
+
+    const makePieceSpan = (frag) => {
+      const sp = doc.createElement('span')
+      copySpanAttrsWithoutId(ancestorSpan, sp)
+      sp.appendChild(frag)
+      return sp
+    }
+
+    if (fragmentHasRenderableContent(beforeFrag)) {
+      out.appendChild(makePieceSpan(beforeFrag))
+    }
+    if (fragmentHasRenderableContent(selectedFrag)) {
+      selectedSpan = makePieceSpan(selectedFrag)
+      out.appendChild(selectedSpan)
+    }
+    if (fragmentHasRenderableContent(afterFrag)) {
+      out.appendChild(makePieceSpan(afterFrag))
+    }
+
+    if (!selectedSpan) return null
+    ancestorSpan.replaceWith(out)
+    return selectedSpan
+  } catch {
+    return null
+  }
+}
+
+function getSelectionTypographySnapshot(range, win) {
+  if (!range || !win?.getComputedStyle) return null
+  const sampleEl =
+    range.startContainer?.nodeType === 3
+      ? range.startContainer.parentElement
+      : range.startContainer?.nodeType === 1
+        ? range.startContainer
+        : null
+  if (!sampleEl) return null
+  try {
+    const cs = win.getComputedStyle(sampleEl)
+    return {
+      fontSize: cs?.fontSize || '',
+      fontStyle: cs?.fontStyle || '',
+      fontWeight: cs?.fontWeight || '',
+    }
+  } catch {
+    return null
+  }
+}
+
+function applyTypographySnapshotToSpan(span, snapshot) {
+  if (!span?.style || !snapshot) return
+  if (snapshot.fontSize) span.style.fontSize = snapshot.fontSize
+  if (snapshot.fontStyle) span.style.fontStyle = snapshot.fontStyle
+  if (snapshot.fontWeight) span.style.fontWeight = snapshot.fontWeight
+}
+
 function toggleInlineTextStyle(editor, doc, win, kind) {
   const sel = doc.getSelection()
   if (!sel?.rangeCount) return
   const range = sel.getRangeAt(0)
+  const beforeTypography = getSelectionTypographySnapshot(range, win)
   let notifyEl = null
 
   const applyToStyle = (style, sampleEl) => {
@@ -667,9 +860,36 @@ function toggleInlineTextStyle(editor, doc, win, kind) {
     cleanupSpanStyle(span)
     notifyEl = span
   } else {
+    if (kind === 'underline' || kind === 'strike') {
+      const token = kind === 'underline' ? 'underline' : 'line-through'
+      const decoAncestor = findDecorationAncestorSpanForPartialRange(range, token)
+      if (decoAncestor) {
+        const isolated = splitAncestorSpanByRange(doc, decoAncestor, range)
+        if (isolated) {
+          applyTypographySnapshotToSpan(isolated, beforeTypography)
+          applyToStyle(isolated.style, isolated)
+          // 조상 분할 직후에는 내부 span(예: font-size 45px)이 실제 선택 스타일일 수 있다.
+          // 여기서 외곽 span 병합을 강제로 수행하면 바깥 조각의 font-size(예: 56px)로 역전될 수 있어 생략한다.
+          cleanupSpanStyle(isolated)
+          const nr = doc.createRange()
+          nr.selectNodeContents(isolated)
+          sel.removeAllRanges()
+          sel.addRange(nr)
+          notifyEl = isolated
+          if (notifyEl) notifyGrapesInputFromDomNode(editor, notifyEl)
+          scheduleEditorCanvasRefresh(editor)
+          return
+        }
+      }
+    }
+
     const startSpan = nearestSpan(range.startContainer)
     const endSpan = nearestSpan(range.endContainer)
-    if (startSpan && startSpan === endSpan) {
+    if (
+      startSpan &&
+      startSpan === endSpan &&
+      rangeSelectsExactlyElementContents(range, startSpan)
+    ) {
       applyToStyle(startSpan.style, startSpan)
       cleanupSpanStyle(startSpan)
       notifyEl = startSpan
@@ -681,6 +901,7 @@ function toggleInlineTextStyle(editor, doc, win, kind) {
         const frag = range.extractContents()
         span.appendChild(frag)
         range.insertNode(span)
+        collapseNestedSpanChainIntoOuter(span)
         const nr = doc.createRange()
         nr.selectNodeContents(span)
         sel.removeAllRanges()
@@ -742,7 +963,11 @@ function applyFontSizePxToSelection(editor, doc, win, px) {
   } else {
     const startSpan = nearestFontSizeSpan(range.startContainer)
     const endSpan = nearestFontSizeSpan(range.endContainer)
-    if (startSpan && startSpan === endSpan) {
+    if (
+      startSpan &&
+      startSpan === endSpan &&
+      rangeSelectsExactlyElementContents(range, startSpan)
+    ) {
       startSpan.style.fontSize = `${n}px`
       notifyGrapesInputFromDomNode(editor, startSpan)
       scheduleEditorCanvasRefresh(editor)
@@ -755,6 +980,7 @@ function applyFontSizePxToSelection(editor, doc, win, px) {
       stripFontSizingFromFragment(frag)
       span.appendChild(frag)
       range.insertNode(span)
+      collapseNestedSpanChainIntoOuter(span)
       // 같은 텍스트를 연속 조절할 때 다음 액션도 이 span 범위를 기준으로 동작하도록 유지
       const nr = doc.createRange()
       nr.selectNodeContents(span)
@@ -1282,6 +1508,105 @@ function stripEmptyClassAttributes(html) {
   }
 }
 
+function normalizeInlineStyleText(styleText) {
+  const map = parseInlineStyleToMap(styleText || '')
+  const out = {}
+  Object.entries(map).forEach(([k, v]) => {
+    const key = String(k || '').toLowerCase().trim()
+    const val = String(v || '').trim()
+    if (!key || !val) return
+    // 기본값은 제거해서 코드 노이즈를 줄인다.
+    if (key === 'font-weight' && (val === 'normal' || val === '400')) return
+    if (key === 'font-style' && val === 'normal') return
+    if ((key === 'text-decoration' || key === 'text-decoration-line') && val === 'none') return
+    out[key] = val
+  })
+  const ordered = Object.keys(out)
+    .sort()
+    .reduce((acc, k) => {
+      acc[k] = out[k]
+      return acc
+    }, {})
+  return styleMapToString(ordered)
+}
+
+function hasRenderableNodeContent(el) {
+  if (!el) return false
+  const childElements = Array.from(el.children || [])
+  if (childElements.length > 0) return true
+  return hasMeaningfulText(el.textContent || '')
+}
+
+function hasOnlyStyleAttr(el) {
+  if (!el?.attributes) return true
+  const attrs = Array.from(el.attributes)
+  return attrs.every((a) => String(a.name || '').toLowerCase() === 'style')
+}
+
+function normalizeInlineSpansHtml(html) {
+  const src = String(html || '')
+  if (!src.trim() || typeof DOMParser === 'undefined') return src
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(`<body>${src}</body>`, 'text/html')
+    const body = doc.body
+
+    // 1) style 정규화 + 기본값 제거
+    body.querySelectorAll('span[style]').forEach((span) => {
+      const next = normalizeInlineStyleText(span.getAttribute('style') || '')
+      if (next) span.setAttribute('style', next)
+      else span.removeAttribute('style')
+    })
+
+    // 2) 빈 span 제거
+    body.querySelectorAll('span').forEach((span) => {
+      if (!hasRenderableNodeContent(span)) span.remove()
+    })
+
+    // 3) 부모/자식 span 동일 style 겹침 해제
+    body.querySelectorAll('span').forEach((span) => {
+      const parent = span.parentElement
+      if (!parent || parent.tagName !== 'SPAN') return
+      const ps = parent.getAttribute('style') || ''
+      const cs = span.getAttribute('style') || ''
+      if (!ps || ps !== cs) return
+      if (!hasOnlyStyleAttr(parent) || !hasOnlyStyleAttr(span)) return
+      while (span.firstChild) parent.insertBefore(span.firstChild, span)
+      span.remove()
+    })
+
+    // 4) 인접 동일 style span 병합
+    body.querySelectorAll('span').forEach((span) => {
+      let next = span.nextSibling
+      while (next && next.nodeType === Node.TEXT_NODE && !hasMeaningfulText(next.textContent || '')) {
+        next = next.nextSibling
+      }
+      if (!next || next.nodeType !== 1 || String(next.tagName || '').toLowerCase() !== 'span') return
+      const a = span.getAttribute('style') || ''
+      const b = next.getAttribute('style') || ''
+      if (a !== b) return
+      if (!hasOnlyStyleAttr(span) || !hasOnlyStyleAttr(next)) return
+      while (next.firstChild) span.appendChild(next.firstChild)
+      next.remove()
+    })
+
+    // 5) style가 완전히 비었으면 span 언랩
+    body.querySelectorAll('span').forEach((span) => {
+      const style = (span.getAttribute('style') || '').trim()
+      if (style) return
+      if (!hasOnlyStyleAttr(span)) return
+      const parent = span.parentNode
+      if (!parent) return
+      while (span.firstChild) parent.insertBefore(span.firstChild, span)
+      span.remove()
+    })
+
+    return body.innerHTML
+  } catch {
+    return src
+  }
+}
+
 function collectIdsFromHtml(html) {
   const out = new Set()
   const src = String(html || '')
@@ -1421,8 +1746,9 @@ function getExportHtml(editor, headAssets, preservedIds) {
   const domHtml = getCanvasDomHtmlSnapshot(editor)
   const raw = domHtml ?? getTopLevelComponentHtmlFromGetHtml(editor) ?? ''
   const sourceHtml = stripRuntimeStyleTagsFromHtml(raw)
+  const normalizedInlineHtml = normalizeInlineSpansHtml(sourceHtml)
   const html = stripTemporaryIdsForExport(
-    stripEmptyClassAttributes(convertImageLinkMetaToAnchors(sourceHtml)),
+    stripEmptyClassAttributes(convertImageLinkMetaToAnchors(normalizedInlineHtml)),
     preservedIds,
   )
   const htmlWithBody = /<body\b/i.test(html) ? html : `<body>\n${html}\n</body>`
@@ -1646,13 +1972,17 @@ function measureCanvasContentHeightPx(editor, { min = 320 } = {}) {
     const wrapperEl = editor.getWrapper?.()?.getEl?.()
     let wrapperChildrenExtent = 0
     if (wrapperEl?.getBoundingClientRect) {
+      const frameWin = editor.Canvas?.getWindow?.()
       const wrapRect = wrapperEl.getBoundingClientRect()
       const kids = Array.from(wrapperEl.children || [])
       if (kids.length) {
         kids.forEach((child) => {
           const r = child?.getBoundingClientRect?.()
           if (!r) return
-          wrapperChildrenExtent = Math.max(wrapperChildrenExtent, Math.round(r.bottom - wrapRect.top))
+          const cs = frameWin?.getComputedStyle?.(child)
+          const marginBottom = Number.parseFloat(cs?.marginBottom || '0') || 0
+          const childExtent = Math.round(r.bottom - wrapRect.top + marginBottom)
+          wrapperChildrenExtent = Math.max(wrapperChildrenExtent, childExtent)
         })
       }
     }
@@ -1988,6 +2318,19 @@ function dataUrlToFile(dataUrl, fallbackName = 'image-upload') {
   return new File([bytes], `${fallbackName}.${ext}`, { type: mimeType })
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    try {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result || ''))
+      reader.onerror = () => reject(reader.error || new Error('파일을 data URL로 읽지 못했습니다.'))
+      reader.readAsDataURL(file)
+    } catch (err) {
+      reject(err)
+    }
+  })
+}
+
 function fitImageWidthToParent(editor, component) {
   if (!editor || !isImgComponent(component)) return
   const attrs = component.getAttributes?.() || {}
@@ -2070,9 +2413,9 @@ function applyLinkToComponent(editor, component, hrefRaw) {
 }
 
 /**
- * @param {{ initialHtml: string; blockLabel: string; sourcePath: string }} props
+ * @param {{ initialHtml: string; blockLabel: string }} props
  */
-export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
+export default function BlockEditor({ initialHtml, blockLabel }) {
   const containerRef = useRef(null)
   const shellRef = useRef(null)
   const editorRef = useRef(null)
@@ -2166,13 +2509,34 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
     return url
   }, [])
 
+  const uploadImageFilePreferServerWithFallback = useCallback(
+    async (file) => {
+      if (!file) throw new Error('업로드할 파일이 없습니다.')
+      try {
+        const uploaded = await uploadImageFileToServer(file)
+        return { src: uploaded, via: 'server' }
+      } catch (err) {
+        console.warn('백엔드 업로드 실패 → data URL 폴백 사용:', err)
+        const dataUrl = await fileToDataUrl(file)
+        return { src: dataUrl, via: 'data-url' }
+      }
+    },
+    [uploadImageFileToServer],
+  )
+
   const normalizeImageSrcForCanvas = useCallback(
     async (srcRaw, fallbackName = 'block-editor-image') => {
       const src = String(srcRaw || '').trim()
       if (!isDataImageSrc(src)) return src
       const file = dataUrlToFile(src, fallbackName)
       if (!file) throw new Error('data URL을 파일로 변환하지 못했습니다.')
-      return uploadImageFileToServer(file)
+      try {
+        return await uploadImageFileToServer(file)
+      } catch (err) {
+        // 서버가 꺼져 있거나 업로드 실패 시 기존 data URL을 유지해 편집 기능을 계속 사용한다.
+        console.warn('data URL 서버 업로드 실패 → 원본 data URL 유지:', err)
+        return src
+      }
     },
     [uploadImageFileToServer],
   )
@@ -2900,7 +3264,7 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
   return (
     <div className="be-root" ref={shellRef}>
       <div className="be-meta">
-        {blockLabel} — 편집 영역 (보내기: <code>getExportHtml(editor)</code>). 원본: <code>{sourcePath}</code>
+        {blockLabel} — 편집 영역
       </div>
 
       <div className="be-toolbar" onMouseDown={onToolbarPointerDown}>
@@ -3087,10 +3451,10 @@ export default function BlockEditor({ initialHtml, blockLabel, sourcePath }) {
                   if (!f) return
                   setImageUploadBusy(true)
                   try {
-                    const uploadedUrl = await uploadImageFileToServer(f)
-                    setModalImage((m) => ({ ...m, url: uploadedUrl }))
+                    const { src } = await uploadImageFilePreferServerWithFallback(f)
+                    setModalImage((m) => ({ ...m, url: src }))
                   } catch (err) {
-                    console.error('이미지 업로드 실패:', err)
+                    console.error('이미지 입력 처리 실패:', err)
                   } finally {
                     setImageUploadBusy(false)
                     e.target.value = ''
